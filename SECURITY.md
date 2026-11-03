@@ -12,7 +12,7 @@ The helper spawns the login tool from an argument list. It does not build a shel
 
 ## What setup does
 
-`tools/setup.sh` is the only privileged step, and only because you run it. The widget and the helper do not call sudo or pkexec. The script installs packages, a pinned gp-saml-gui checkout, and the systemd unit. Review it before you run it.
+`tools/setup.sh` is the only privileged step. The dropdown's Install button opens your terminal and runs that script; you approve the password there. The widget and the helper do not call sudo or pkexec. The script installs packages, a pinned gp-saml-gui checkout, and the systemd unit. Review it before you run it.
 
 ## What this does not protect
 

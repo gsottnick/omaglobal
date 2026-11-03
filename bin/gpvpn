@@ -21,8 +21,9 @@ import sys
 
 EXAMPLE_PORTAL = "vpn.example.com"
 EXAMPLE_USER = "user@example.com"
-SETUP_HINT = "Daemon socket is not available. Run tools/setup.sh once in a terminal."
-WEBKIT_HINT = "The login window needs webkit2gtk-4.1. Run tools/setup.sh once in a terminal."
+SAML_PIN = "21cce40334791a533c7a263fe367f0ddc072d8fb"
+SETUP_HINT = "Daemon socket is not available. Press Install in the bar, or run tools/setup.sh once in a terminal."
+WEBKIT_HINT = "The login window needs webkit2gtk-4.1. Press Install in the bar, or run tools/setup.sh once in a terminal."
 CONNECT_WAIT = 90
 _COOKIE_SHAPED = re.compile(r"[A-Za-z0-9+/=]{40,}")
 
@@ -240,7 +241,7 @@ def saml_env_and_argv(portal: str, jar: str) -> tuple[dict[str, str], list[str]]
 def run_saml(portal: str, jar: str) -> tuple[int, str]:
     script = saml_script()
     if not os.path.isfile(script):
-        print("Login helper is not installed. Run tools/setup.sh once in a terminal.", file=sys.stderr)
+        print("Login helper is not installed. Press Install in the bar, or run tools/setup.sh once in a terminal.", file=sys.stderr)
         return 1, ""
     jar_dir = os.path.dirname(jar)
     os.makedirs(jar_dir, exist_ok=True)
@@ -358,6 +359,95 @@ def cmd_setup_check() -> int:
     status, message = transact({"cmd": "status"}, terminal=False, timeout=2)
     if status == 4 or message is None:
         return 4
+    return 0
+
+
+def _package_present(name: str) -> bool:
+    completed = subprocess.run(
+        ["pacman", "-Q", name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _saml_present() -> bool:
+    script = saml_script()
+    repo = os.path.dirname(script)
+    if not os.path.isfile(script):
+        return False
+    completed = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode == 0 and completed.stdout.strip() == SAML_PIN
+
+
+def _socket_present() -> bool:
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(0.2)
+    try:
+        client.connect(socket_path())
+    except OSError:
+        return False
+    finally:
+        client.close()
+    return True
+
+
+def dep_items() -> list[dict[str, object]]:
+    """What setup.sh installs, and whether this machine already has it.
+
+    `required` is what the running plugin needs. git and wl-clipboard are
+    only there because the setup script installs them; a machine that already
+    has the tunnel, the login window, and the service does not need them.
+    """
+    packages = [
+        ("openconnect", "VPN tunnel", True),
+        ("python-requests", "Portal login", True),
+        ("python-gobject", "Login window", True),
+        ("gtk3", "Login window", True),
+        ("gobject-introspection", "Login window", True),
+        ("webkit2gtk-4.1", "Login window", True),
+        ("wl-clipboard", "Clipboard tools", False),
+        ("git", "Downloads the login helper", False),
+    ]
+    items: list[dict[str, object]] = []
+    for name, purpose, required in packages:
+        items.append(
+            {
+                "name": name,
+                "purpose": purpose,
+                "present": _package_present(name),
+                "required": required,
+            }
+        )
+    items.append(
+        {
+            "name": "gp-saml-gui",
+            "purpose": "Sign-in program",
+            "present": _saml_present(),
+            "required": True,
+        }
+    )
+    items.append(
+        {
+            "name": "gp-vpn.socket",
+            "purpose": "Background service that starts the tunnel",
+            "present": _socket_present(),
+            "required": True,
+        }
+    )
+    return items
+
+
+def cmd_deps() -> int:
+    items = dep_items()
+    ready = all(item["present"] for item in items if item["required"])
+    print(json.dumps({"ready": ready, "items": items}))
     return 0
 
 
@@ -487,6 +577,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("status")
     sub.add_parser("setup-check")
+    sub.add_parser("deps")
     sub.add_parser("notify")
 
     profile = sub.add_parser("profile")
@@ -517,6 +608,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_status()
     if args.cmd == "setup-check":
         return cmd_setup_check()
+    if args.cmd == "deps":
+        return cmd_deps()
     if args.cmd == "notify":
         return cmd_notify()
     if args.cmd == "profile" and args.profile_cmd == "list":

@@ -6,13 +6,13 @@ The bar widget (MIT) talks to a small helper and daemon (GPL-3.0-or-later) over 
 
 ## Setup
 
-From this directory:
+The bar dropdown lists what is already installed and what is missing. Press Install to add only the missing pieces. That opens a terminal and asks for your password there. If the tunnel program, the login window, and the background service are already there, the dropdown is the connect controls and Install is not shown. Or, from this directory:
 
 ```
 tools/setup.sh
 ```
 
-That installs `openconnect` and the libraries the login window needs, clones the pinned gp-saml-gui, and starts the `gp-vpn.socket` systemd unit. Then add a profile and connect:
+That installs `openconnect` and the libraries the login window needs, clones the pinned gp-saml-gui, and starts the `gp-vpn.socket` systemd unit. In the dropdown, enter the portal address and username, then press Connect. The same steps from a terminal:
 
 ```
 gpvpn setup-check
@@ -27,7 +27,7 @@ Replace the portal and username with yours. They stay in `gp-vpn/profiles.json` 
 
 After a connection, the dropdown lists that portal's gateways. Automatic keeps the portal's choice. A gateway you pick is used the next time you connect.
 
-Until the socket exists, the bar dropdown shows only that setup command and a Copy button.
+Until those pieces are present, the dropdown shows the installed list, the missing list, and Install.
 
 ## Uninstall
 

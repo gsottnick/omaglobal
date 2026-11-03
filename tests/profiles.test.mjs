@@ -31,3 +31,11 @@ test("profiles round-trip and mode is always gateway", async () => {
   assert.equal(removed.profiles[0].name, "Default")
   console.log("profile round-trip")
 })
+
+test("connect without a profile exits 2 and says to add one", async () => {
+  const { env } = await tempHome()
+  const result = await run(gpvpn, ["connect", "--profile", "Default"], env)
+  assert.equal(result.code, 2)
+  assert.match(result.stderr, /No such profile\. Add one with: gpvpn profile add/)
+  console.log("no-profile exit 2")
+})

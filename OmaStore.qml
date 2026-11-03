@@ -11,7 +11,11 @@ import Quickshell.Io
 Singleton {
   id: root
 
-  readonly property string setupCommand: "tools/setup.sh"
+  readonly property string setupCommand: pluginRoot + "tools/setup.sh"
+  property bool installRunning: false
+  property bool depsLoaded: false
+  property bool ready: false
+  property var deps: []
   readonly property string pluginRoot: {
     var s = String(Qt.resolvedUrl("."))
     if (s.indexOf("file://") === 0)
@@ -47,6 +51,8 @@ Singleton {
   property bool autoTried: false
   property bool userAskedDisconnect: false
   property bool profilesLoaded: false
+  property bool profileSaving: false
+  property bool connectAfterSave: false
   property bool keepActive: false
   property bool socketSeen: false
   property int socketRetries: 0
@@ -55,6 +61,10 @@ Singleton {
   property int notifyConnectCount: 0
   property int notifyDisconnectCount: 0
   property int notifyDropCount: 0
+  property bool connectPending: false
+  property bool connectHeard: false
+  property int connectCode: -1
+  property string connectError: ""
 
   function redact(value) {
     return String(value || "").replace(/[A-Za-z0-9+/=]{40,}/g, "[redacted]")
@@ -76,10 +86,30 @@ Singleton {
   function maybeAutoConnect() {
     if (!profilesLoaded || !autoConnect || autoTried || !socketUp)
       return
+    if (!profiles.length || profileSaving || connectAfterSave || connectProc.running)
+      return
     if (phase !== "off" && phase !== "failed")
       return
     autoTried = true
     connect()
+  }
+
+  function saveAndConnect(portal, username) {
+    var portalText = String(portal || "").trim()
+    var userText = String(username || "").trim()
+    if (!portalText || !userText) {
+      phase = "failed"
+      rawState = "failed"
+      message = "Enter your portal and username."
+      refreshStatus()
+      return
+    }
+    if (addProc.running)
+      return
+    connectAfterSave = true
+    profileSaving = true
+    addProc.command = [helper, "profile", "add", "--name", activeProfile || "Default", "--portal", portalText, "--username", userText]
+    addProc.running = true
   }
 
   function tooltipText() {
@@ -153,6 +183,9 @@ Singleton {
     }
     if (obj.type !== "state" && obj.type !== "accepted")
       return
+    // This attempt already has a daemon phase. Do not replace it with helper stderr.
+    if (connectPending)
+      connectHeard = true
     var next = String(obj.state || "idle")
     var visual = "off"
     if (next === "auth")
@@ -195,8 +228,26 @@ Singleton {
     if (phase === "auth" || phase === "connecting" || phase === "connected")
       return
     userAskedDisconnect = false
+    connectPending = true
+    connectHeard = false
+    connectCode = -1
+    connectError = ""
     connectProc.running = false
     connectProc.running = true
+  }
+
+  function settleConnect() {
+    if (!connectPending || connectHeard || connectCode < 0)
+      return
+    if (connectCode === 0) {
+      connectPending = false
+      return
+    }
+    // The helper quit before the daemon spoke. Same failed status as a daemon failure.
+    phase = "failed"
+    rawState = "failed"
+    message = redact(connectError).trim()
+    refreshStatus()
   }
 
   function disconnect() {
@@ -241,11 +292,43 @@ Singleton {
     retryTimer.start()
   }
 
-  function copySetup() {
-    copyProc.stdinEnabled = true
-    copyProc.running = true
-    copyProc.write(setupCommand)
-    copyProc.stdinEnabled = false
+  function installSetup() {
+    // The terminal is where the script asks for a password.
+    if (installProc.running)
+      return
+    installProc.command = [
+      "xdg-terminal-exec", "--hold",
+      "--app-id=io.github.gsottnick.omaglobal",
+      "--title=OmaGlobal setup",
+      "-e", setupCommand
+    ]
+    installProc.running = true
+  }
+
+  function pokeSocket() {
+    socketRetrying = true
+    sock.connected = false
+    sock.connected = true
+    socketRetrying = false
+  }
+
+  function refreshDeps() {
+    if (!depsProc.running)
+      depsProc.running = true
+  }
+
+  function applyDeps(text) {
+    try {
+      var data = JSON.parse(text)
+      deps = data.items || []
+      ready = data.ready === true
+    } catch (error) {
+      deps = []
+      ready = false
+    }
+    depsLoaded = true
+    if (ready && !socketUp)
+      pokeSocket()
   }
 
   function applyProfiles(text) {
@@ -266,7 +349,10 @@ Singleton {
       listProc.running = true
   }
 
-  Component.onCompleted: reloadProfiles()
+  Component.onCompleted: {
+    reloadProfiles()
+    refreshDeps()
+  }
 
   Socket {
     id: sock
@@ -302,10 +388,19 @@ Singleton {
     repeat: false
     onTriggered: {
       root.socketRetries += 1
-      root.socketRetrying = true
-      sock.connected = false
-      sock.connected = true
-      root.socketRetrying = false
+      root.pokeSocket()
+    }
+  }
+
+  // While the setup terminal is open, notice the socket as soon as it exists.
+  Timer {
+    id: installTimer
+    interval: 2000
+    repeat: true
+    running: root.installRunning && !root.socketUp
+    onTriggered: {
+      root.pokeSocket()
+      root.refreshDeps()
     }
   }
 
@@ -319,9 +414,52 @@ Singleton {
   }
 
   Process {
+    id: addProc
+    stderr: StdioCollector {
+      id: addErr
+      waitForEnd: true
+    }
+    onExited: function (code) {
+      root.profileSaving = false
+      var start = root.connectAfterSave
+      root.connectAfterSave = false
+      if (code !== 0) {
+        root.phase = "failed"
+        root.rawState = "failed"
+        root.message = root.redact(String(addErr.text || "")).trim() || "Could not save that profile."
+        root.refreshStatus()
+        return
+      }
+      root.reloadProfiles()
+      if (start) {
+        root.autoTried = true
+        root.connect()
+      }
+    }
+  }
+
+  Process {
     id: connectProc
     command: [root.helper, "connect", "--profile", root.activeProfile]
-    onExited: function (code) { root.reloadProfiles() }
+    stderr: StdioCollector {
+      id: connectErr
+      waitForEnd: true
+      onStreamFinished: {
+        var next = String(text || "")
+        if (next !== "")
+          root.connectError = next
+        root.settleConnect()
+      }
+    }
+    // Exit is the event. A non-zero exit does not start another connect.
+    onExited: function (code) {
+      root.connectCode = code
+      var live = String(connectErr.text || "")
+      if (live !== "")
+        root.connectError = live
+      root.settleConnect()
+      root.reloadProfiles()
+    }
   }
 
   Process {
@@ -340,8 +478,21 @@ Singleton {
   }
 
   Process {
-    id: copyProc
-    command: ["wl-copy"]
+    id: installProc
+    onRunningChanged: root.installRunning = running
+    onExited: function (code) {
+      root.pokeSocket()
+      root.refreshDeps()
+    }
+  }
+
+  Process {
+    id: depsProc
+    command: [root.helper, "deps"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyDeps(text)
+    }
   }
 
   Process {

@@ -169,7 +169,8 @@ def scenario_setup(shell: Path) -> None:
     if proc.returncode != 0:
         raise SystemExit(f"setup load failed\n{proc.stderr}")
     row = snaps(proc)[-1]
-    if not (row["setupVisible"] is True and row["setupCommand"] == "tools/setup.sh" and row["phase"] == "off" and row["socketUp"] is False):
+    command = str(row["setupCommand"])
+    if not (row["setupVisible"] is True and command.endswith("tools/setup.sh") and row["phase"] == "off" and row["socketUp"] is False):
         raise SystemExit(f"setup card mismatch {row}")
     print(f"SETUP setupVisible=true command={row['setupCommand']}")
 
@@ -228,14 +229,70 @@ def scenario_states(shell: Path) -> None:
         stop_fake(fake)
 
 
+def scenario_connect(shell: Path, plugin: Path | None = None) -> None:
+    """Connect with no profile asks for a portal in the form, then the typed values are saved by the helper."""
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    sock = os.path.join(root, "ctrl.sock")
+    env = xdg_env(sock, root)
+    plugin_qml = plugin if plugin is not None else (REPO / "Panel.qml")
+    helper = plugin_qml.parent / "bin" / "gpvpn"
+    fake = start_fake(sock)
+    try:
+        steps = "open,connect,type:portalField=vpn.example.com,type:usernameField=user@example.com,connect,wait:900"
+        proc = run_main(shell, BASE_SETTINGS, steps, sock, plugin_qml, True, env)
+        assert_clean(proc.stdout + proc.stderr, "connect")
+        if proc.returncode != 0:
+            raise SystemExit(f"connect load failed\n{proc.stderr}\n{proc.stdout}")
+        rows = snaps(proc)
+        if len(rows) < 4:
+            raise SystemExit(f"connect snapshots missing {len(rows)}")
+        opened = rows[1]
+        empty = rows[2]
+        shown = rows[-1]
+        if opened["opened"] is not True or opened["socketUp"] is not True or opened["phase"] != "off":
+            raise SystemExit(f"connect did not start from a disconnected dropdown {opened}")
+        empty_text = f"{empty['statusLine']}\n{empty['errorLine']}"
+        if empty["phase"] != "failed" or "portal" not in empty["statusLine"].lower() or "username" not in empty["statusLine"].lower():
+            raise SystemExit(f"empty connect did not ask for a portal {empty['phase']} {empty['statusLine']!r}")
+        if "gpvpn" in empty_text or "setup.sh" in empty_text or connect_spawns(empty) != 0:
+            raise SystemExit(f"empty connect ran a command {empty_text!r} spawns={connect_spawns(empty)}")
+        adds = [command for command in shown["executed"] if len(command) >= 2 and command[1] == "profile" and "add" in command]
+        if len(adds) != 1 or Path(adds[0][0]).resolve() != helper.resolve():
+            raise SystemExit(f"profile was not saved by the helper {adds}")
+        if "vpn.example.com" not in adds[0] or "user@example.com" not in adds[0]:
+            raise SystemExit(f"saved command missed the typed values {adds[0]}")
+        if connect_spawns(shown) != 1:
+            raise SystemExit(f"connect after save spawned {connect_spawns(shown)}")
+        saved = json.loads((Path(env["XDG_CONFIG_HOME"]) / "gp-vpn" / "profiles.json").read_text(encoding="utf-8"))
+        stored = saved.get("profiles") or []
+        if len(stored) != 1 or stored[0].get("portal") != "vpn.example.com" or stored[0].get("username") != "user@example.com":
+            raise SystemExit(f"profile file mismatch {stored}")
+        if re.search(r"[A-Za-z0-9+/=]{40,}", empty_text):
+            raise SystemExit(f"cookie-like secret shown {empty_text}")
+        print("CONNECT form saved=vpn.example.com")
+    finally:
+        stop_fake(fake)
+
+
 def scenario_auto(shell: Path, enabled: bool) -> None:
-    sock_dir = tempfile.mkdtemp(prefix="omaglobal-sock-")
-    sock = os.path.join(sock_dir, "ctrl.sock")
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    sock = os.path.join(root, "ctrl.sock")
+    env = xdg_env(sock, root)
+    if enabled:
+        seeded = subprocess.run(
+            [str(REPO / "bin" / "gpvpn"), "profile", "add", "--name", "Default", "--portal", "vpn.example.com", "--username", "user@example.com"],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if seeded.returncode != 0:
+            raise SystemExit(seeded.stderr)
     fake = start_fake(sock)
     try:
         settings = dict(BASE_SETTINGS)
         settings["autoConnect"] = "On" if enabled else "Off"
-        proc = run_main(shell, settings, "", sock, None, True)
+        proc = run_main(shell, settings, "", sock, None, True, env)
         assert_clean(proc.stdout + proc.stderr, "autoconnect")
         if proc.returncode != 0:
             raise SystemExit(proc.stderr)
@@ -295,10 +352,21 @@ def scenario_negative(shell: Path) -> None:
     print("NEGATIVE HARNESS_FAIL")
 
 
+def shell_dir(path: Path) -> Path:
+    """Accept either a shell tree or an Omarchy checkout that keeps it under shell/."""
+    if (path / "Commons").is_dir() and (path / "Ui").is_dir():
+        return path
+    nested = path / "shell"
+    if (nested / "Commons").is_dir() and (nested / "Ui").is_dir():
+        return nested
+    return path
+
+
 def main() -> int:
     require_pyside()
-    shell = Path(sys.argv[1]).resolve()
+    shell = shell_dir(Path(sys.argv[1]).resolve())
     label = sys.argv[2] if len(sys.argv) > 2 else shell.name
+    plugin = Path(sys.argv[3]).resolve() if len(sys.argv) > 3 else None
     print(f"SHELL {label}")
     missing = sorted(shell_imports(shell) - STUBS)
     if missing:
@@ -306,6 +374,7 @@ def main() -> int:
     print("STUBS complete")
     scenario_setup(shell)
     scenario_states(shell)
+    scenario_connect(shell, plugin)
     scenario_auto(shell, True)
     scenario_auto(shell, False)
     scenario_profile(shell)

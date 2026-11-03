@@ -124,6 +124,17 @@ test("a missing WebKit library is not called a cancelled login", async () => {
   console.log("missing WebKit names the package")
 })
 
+test("a cancelled login exits 1 and says so", async () => {
+  const { env } = await tempHome()
+  const script = path.join(env.XDG_DATA_HOME, "gp-vpn", "gp-saml-gui", "gp_saml_gui.py")
+  await writeFile(script, "import sys\nsys.exit(1)\n")
+  await run(gpvpn, ["profile", "add", "--name", "Default", "--portal", "vpn.example.com", "--username", "user@example.com"], env)
+  const result = await run(gpvpn, ["connect", "--profile", "Default"], env)
+  assert.equal(result.code, 1)
+  assert.match(result.stderr, /Login cancelled/)
+  console.log("login cancelled exit 1")
+})
+
 test("a gateway failure retries onto the portal interface and then connects", async () => {
   const { dir, env } = await tempHome()
   await writeSaml(env, SAML_OK)

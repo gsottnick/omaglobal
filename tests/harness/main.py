@@ -76,6 +76,8 @@ def snapshot(plugin, store):
 
         button = plugin.findChild(QObject, "barButton")
         status = plugin.findChild(QObject, "statusLine")
+        error = plugin.findChild(QObject, "errorLine")
+        connect_button = plugin.findChild(QObject, "connectButton")
         phase_text = read_prop(status, "text", "")
     piped = [{"command": row["command"], "stdin": row["stdin"]} for row in io.PIPED]
     return {
@@ -87,6 +89,8 @@ def snapshot(plugin, store):
         "opened": read_prop(plugin, "opened", None),
         "pulseRunning": bool(plugin.findChild(type(plugin), "authPulse")) if False else None,
         "statusLine": phase_text,
+        "errorLine": read_prop(error, "text", "") if plugin is not None else "",
+        "connectText": read_prop(connect_button, "text", "") if plugin is not None else "",
         "barIp": read_prop(plugin.findChild(QObject, "barIp"), "text", "") if plugin is not None else "",
         "ip": read_prop(plugin, "vpnIp", ""),
         "gateway": read_prop(plugin, "vpnGateway", ""),
@@ -128,6 +132,27 @@ def apply_step(step, plugin, store):
         push(argument)
     elif name == "disconnect":
         plugin.requestDisconnect()
+    elif name == "type":
+        from PySide6.QtCore import QObject
+
+        target, _, value = argument.partition("=")
+        field = plugin.findChild(QObject, target)
+        if field is None:
+            raise SystemExit(f"field missing: {target}")
+        field.setProperty("text", value)
+    elif name == "connect":
+        from PySide6.QtCore import QObject
+
+        button = plugin.findChild(QObject, "connectButton")
+        if button is None:
+            raise SystemExit("connect button missing")
+        clicked = getattr(button, "clicked", None)
+        if clicked is None:
+            raise SystemExit("connect button has no clicked signal")
+        if hasattr(clicked, "emit"):
+            clicked.emit()
+        else:
+            clicked()
     elif name == "choose":
         plugin.chooseProfile(argument)
     elif name == "settings":

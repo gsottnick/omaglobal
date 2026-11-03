@@ -7,7 +7,7 @@ import "."
 // Dropdown. With the daemon socket absent this is only the setup card.
 Column {
   id: root
-  spacing: Style.spacing.sm
+  spacing: Style.space(10)
 
   readonly property string fontFamily: OmaStore.pluginRoot ? Style.font.family : Style.font.family
 
@@ -18,6 +18,26 @@ Column {
         return profiles[i]
     }
     return null
+  }
+
+  readonly property var installedItems: {
+    var out = []
+    var items = OmaStore.deps || []
+    for (var i = 0; i < items.length; i++) {
+      if (items[i] && items[i].present)
+        out.push(items[i])
+    }
+    return out
+  }
+
+  readonly property var missingItems: {
+    var out = []
+    var items = OmaStore.deps || []
+    for (var i = 0; i < items.length; i++) {
+      if (items[i] && !items[i].present)
+        out.push(items[i])
+    }
+    return out
   }
 
   readonly property var gatewayModel: {
@@ -31,34 +51,83 @@ Column {
 
   Column {
     objectName: "setupCard"
-    visible: !OmaStore.socketUp
+    // A machine that already has the tunnel, the login window, and the
+    // service is ready: the connect controls show and this card does not.
+    visible: !OmaStore.ready || root.missingItems.length > 0
     width: parent.width
-    spacing: Style.spacing.xs
+    spacing: Style.space(10)
+
+    PanelSectionHeader {
+      text: "Setup"
+      width: parent.width
+    }
 
     Text {
       width: parent.width
       wrapMode: Text.WordWrap
       textFormat: Text.PlainText
-      color: Color.foreground
+      color: Color.muted
       font.family: Style.font.family
       font.pixelSize: Style.font.body
-      text: "OmaGlobal needs a one-time setup before it can connect. Run this in a terminal:"
+      text: OmaStore.depsLoaded
+        ? "OmaGlobal needs a VPN tunnel, a login window, and a background service. Install adds only what is missing and asks for your password in a terminal."
+        : "Checking what's installed."
     }
 
-    Text {
-      objectName: "setupCommand"
+    Column {
       width: parent.width
-      textFormat: Text.PlainText
-      color: Color.accent
-      font.family: Style.font.family
-      font.pixelSize: Style.font.body
-      text: OmaStore.setupCommand
+      spacing: Style.space(2)
+      visible: root.installedItems.length > 0
+
+      PanelSectionHeader { text: "Installed" }
+
+      Repeater {
+        model: root.installedItems
+        Text {
+          objectName: "installedDep"
+          width: parent.width
+          wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
+          color: Color.muted
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          text: modelData.name + " — " + modelData.purpose
+        }
+      }
     }
 
-    WidgetButton {
-      objectName: "copySetup"
-      text: "Copy"
-      onPressed: function (button) { OmaStore.copySetup() }
+    Column {
+      width: parent.width
+      spacing: Style.space(2)
+      visible: root.missingItems.length > 0
+
+      PanelSectionHeader { text: "Will install" }
+
+      Repeater {
+        model: root.missingItems
+        Text {
+          objectName: "missingDep"
+          width: parent.width
+          wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
+          color: Color.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          text: modelData.name + " — " + modelData.purpose
+        }
+      }
+    }
+
+    Button {
+      objectName: "installSetup"
+      width: parent.width
+      visible: root.missingItems.length > 0
+      text: OmaStore.installRunning ? "Installing..." : "Install"
+      bordered: true
+      active: !OmaStore.installRunning
+      enabled: !OmaStore.installRunning
+      verticalPadding: Style.space(8)
+      onClicked: OmaStore.installSetup()
     }
   }
 
@@ -66,7 +135,43 @@ Column {
     objectName: "sessionCard"
     visible: OmaStore.socketUp
     width: parent.width
-    spacing: Style.spacing.xs
+    spacing: Style.space(10)
+
+    Column {
+      id: profileForm
+      objectName: "profileForm"
+      visible: OmaStore.profiles.length === 0
+      width: parent.width
+      spacing: Style.space(4)
+
+      PanelSectionHeader { text: "Profile" }
+
+      Text {
+        width: parent.width
+        wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
+        color: Color.muted
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        text: "Enter the portal address and the username you sign in with."
+      }
+
+      TextField {
+        id: portalField
+        objectName: "portalField"
+        width: parent.width
+        placeholderText: "Portal address"
+        onAccepted: usernameField.forceActiveFocus()
+      }
+
+      TextField {
+        id: usernameField
+        objectName: "usernameField"
+        width: parent.width
+        placeholderText: "Username"
+        onAccepted: OmaStore.saveAndConnect(portalField.text, usernameField.text)
+      }
+    }
 
     Text {
       objectName: "statusLine"
@@ -79,79 +184,91 @@ Column {
       text: OmaStore.statusLine
     }
 
-    WidgetButton {
+    Button {
       objectName: "connectButton"
-      text: (OmaStore.phase === "connected" || OmaStore.phase === "auth" || OmaStore.phase === "connecting") ? "Disconnect" : "Connect"
-      onPressed: function (button) {
-        if (OmaStore.phase === "off" || OmaStore.phase === "failed")
-          OmaStore.connect()
-        else
-          OmaStore.disconnect()
-      }
-    }
-
-    Text {
-      textFormat: Text.PlainText
-      color: Color.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
-      text: "Profile"
-    }
-
-    Repeater {
-      model: OmaStore.profiles
-      WidgetButton {
-        objectName: "profileButton"
-        text: modelData.name
-        active: modelData.name === OmaStore.activeProfile
-        onPressed: function (button) { OmaStore.chooseProfile(modelData.name) }
-      }
-    }
-
-    Text {
-      visible: OmaStore.profiles.length === 0
-      textFormat: Text.PlainText
-      color: Color.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
-      text: "Add a profile with gpvpn profile add"
-    }
-
-    Text {
-      textFormat: Text.PlainText
-      color: Color.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
-      text: "Gateway"
-    }
-
-    Text {
-      objectName: "gatewayEmpty"
-      visible: root.gatewayModel.length === 0
       width: parent.width
-      wrapMode: Text.WordWrap
-      textFormat: Text.PlainText
-      color: Color.muted
-      font.family: Style.font.family
-      font.pixelSize: Style.font.bodySmall
-      text: "Connect once and the portal's gateways show up here."
+      bordered: true
+      active: OmaStore.phase === "connected"
+      verticalPadding: Style.space(8)
+      enabled: !OmaStore.profileSaving
+      text: {
+        if (OmaStore.profileSaving)
+          return "Saving..."
+        if (OmaStore.phase === "connected" || OmaStore.phase === "auth" || OmaStore.phase === "connecting")
+          return "Disconnect"
+        return "Connect"
+      }
+      onClicked: {
+        if (OmaStore.phase === "connected" || OmaStore.phase === "auth" || OmaStore.phase === "connecting")
+          OmaStore.disconnect()
+        else if (OmaStore.profiles.length === 0)
+          OmaStore.saveAndConnect(portalField.text, usernameField.text)
+        else
+          OmaStore.connect()
+      }
     }
 
-    WidgetButton {
-      objectName: "gatewayAuto"
-      visible: root.gatewayModel.length > 0
-      text: "Automatic"
-      active: root.activeEntry === null || !root.activeEntry.gateway
-      onPressed: function (button) { OmaStore.chooseGateway("", "") }
+    Column {
+      visible: OmaStore.profiles.length > 0
+      width: parent.width
+      spacing: Style.space(4)
+
+      PanelSectionHeader { text: "Profile" }
+
+      Repeater {
+        model: OmaStore.profiles
+        Button {
+          objectName: "profileButton"
+          width: parent.width
+          bordered: true
+          leftAlign: true
+          text: modelData.name
+          active: modelData.name === OmaStore.activeProfile
+          onClicked: OmaStore.chooseProfile(modelData.name)
+        }
+      }
     }
 
-    Repeater {
-      model: root.gatewayModel
-      WidgetButton {
-        objectName: "gatewayButton"
-        text: modelData.name || modelData.host || ""
-        active: root.activeEntry !== null && root.activeEntry.gatewayName === (modelData.name || "")
-        onPressed: function (button) { OmaStore.chooseGateway(modelData.name || "", modelData.host || "") }
+    Column {
+      width: parent.width
+      spacing: Style.space(4)
+
+      PanelSectionHeader { text: "Gateway" }
+
+      Text {
+        objectName: "gatewayEmpty"
+        visible: root.gatewayModel.length === 0
+        width: parent.width
+        wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
+        color: Color.muted
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        text: "Connect once and the portal's gateways show up here."
+      }
+
+      Button {
+        objectName: "gatewayAuto"
+        visible: root.gatewayModel.length > 0
+        width: parent.width
+        bordered: true
+        leftAlign: true
+        text: "Automatic"
+        active: root.activeEntry === null || !root.activeEntry.gateway
+        onClicked: OmaStore.chooseGateway("", "")
+      }
+
+      Repeater {
+        model: root.gatewayModel
+        Button {
+          objectName: "gatewayButton"
+          width: parent.width
+          bordered: true
+          leftAlign: true
+          text: modelData.name || modelData.host || ""
+          active: root.activeEntry !== null && root.activeEntry.gatewayName === (modelData.name || "")
+          onClicked: OmaStore.chooseGateway(modelData.name || "", modelData.host || "")
+        }
       }
     }
 
@@ -159,31 +276,37 @@ Column {
       objectName: "sessionFacts"
       visible: OmaStore.phase === "connected"
       width: parent.width
-      spacing: Style.spacing.xxs
+      spacing: Style.space(2)
+
+      PanelSectionHeader { text: "Session" }
 
       Text {
         objectName: "vpnIp"
+        width: parent.width
         textFormat: Text.PlainText
         color: Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
-        text: OmaStore.ip
+        text: "Address  " + OmaStore.ip
       }
       Text {
         objectName: "vpnGateway"
+        width: parent.width
         textFormat: Text.PlainText
         color: Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
-        text: OmaStore.gateway
+        text: "Gateway  " + OmaStore.gateway
       }
       Text {
         objectName: "vpnExpires"
+        width: parent.width
+        elide: Text.ElideRight
         textFormat: Text.PlainText
-        color: Color.foreground
+        color: Color.muted
         font.family: Style.font.family
-        font.pixelSize: Style.font.body
-        text: OmaStore.expires
+        font.pixelSize: Style.font.bodySmall
+        text: "Expires  " + OmaStore.expires
       }
     }
 

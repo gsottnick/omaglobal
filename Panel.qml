@@ -139,6 +139,8 @@ Panel {
     onPressed: function (buttonCode) { root.toggle() }
   }
 
+  onOpenedChanged: if (root.opened) OmaStore.refreshDeps()
+
   KeyboardPanel {
     id: card
     objectName: "vpnPanel"
@@ -147,11 +149,12 @@ Panel {
     bar: root.bar
     open: root.opened
     contentWidth: Style.space(300)
-    contentHeight: Style.space(280)
+    contentHeight: card.fittedContentHeight(popup.implicitHeight, Style.space(520))
 
     OmaPopup {
+      id: popup
       objectName: "vpnPopup"
-      width: Style.space(268)
+      width: parent.width
     }
   }
 }
