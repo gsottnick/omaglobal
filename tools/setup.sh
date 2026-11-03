@@ -20,8 +20,8 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/gp-vpn"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/gp-vpn"
 
-echo "pacman -S --needed openconnect python-requests python-gobject git"
-sudo pacman -S --needed --noconfirm openconnect python-requests python-gobject git
+echo "pacman -S --needed openconnect python-requests python-gobject gtk3 gobject-introspection webkit2gtk-4.1 wl-clipboard git"
+sudo pacman -S --needed --noconfirm openconnect python-requests python-gobject gtk3 gobject-introspection webkit2gtk-4.1 wl-clipboard git
 
 echo "clone gp-saml-gui at ${PIN}"
 mkdir -p "$DATA" "$CONFIG"

@@ -17,3 +17,5 @@ The helper spawns the login tool from an argument list. It does not build a shel
 ## What this does not protect
 
 A local account in group `wheel` can send its own cookie to the daemon. Do not widen the socket mode. The login cookie is a bearer token for the gateway for as long as the gateway says it is; the daemon forgets it after handing it to openconnect. Profiles live in your config directory and contain the portal and username, not the cookie.
+
+The reusable login session is the cookie jar under the cache directory `gp-vpn/`. That directory is mode `0700` and the jar is mode `0600`. A second `gpvpnd` will not unlink a control socket that is already accepting connections. The daemon process itself runs as root, because it has to start the tunnel. The unit does not add a sandbox.

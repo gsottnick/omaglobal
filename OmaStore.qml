@@ -48,6 +48,10 @@ Singleton {
   property bool userAskedDisconnect: false
   property bool profilesLoaded: false
   property bool keepActive: false
+  property bool socketSeen: false
+  property int socketRetries: 0
+  property bool socketRetrying: false
+  property var gatewayQueue: []
   property int notifyConnectCount: 0
   property int notifyDisconnectCount: 0
   property int notifyDropCount: 0
@@ -209,6 +213,34 @@ Singleton {
     activeProc.running = true
   }
 
+  function chooseGateway(name, host) {
+    // Empty name and host clear the override and let the portal choose.
+    gatewayQueue = [
+      [helper, "profile", "set", activeProfile, "gateway", String(host || "")],
+      [helper, "profile", "set", activeProfile, "gatewayName", String(name || "")]
+    ]
+    if (!gatewayProc.running)
+      runGatewayQueue()
+  }
+
+  function runGatewayQueue() {
+    if (gatewayProc.running || gatewayQueue.length === 0)
+      return
+    var next = gatewayQueue[0]
+    gatewayQueue = gatewayQueue.slice(1)
+    gatewayProc.command = next
+    gatewayProc.running = true
+  }
+
+  function scheduleRetry() {
+    // A missing socket means setup has not been run. Retry only after this
+    // bar has already talked to a daemon, so a restart does not look like
+    // a missing install.
+    if (!socketSeen || socketRetries >= 8 || retryTimer.running || socketRetrying)
+      return
+    retryTimer.start()
+  }
+
   function copySetup() {
     copyProc.stdinEnabled = true
     copyProc.running = true
@@ -244,17 +276,36 @@ Singleton {
       root.socketUp = connected
       root.refreshStatus()
       if (connected) {
+        root.socketSeen = true
+        root.socketRetries = 0
+        retryTimer.stop()
         write('{"cmd":"status"}\n')
         flush()
         root.maybeAutoConnect()
       }
     }
     onError: function (code) {
+      if (root.socketRetrying)
+        return
       root.socketUp = false
       root.refreshStatus()
+      root.scheduleRetry()
     }
     parser: SplitParser {
       onRead: function (line) { root.ingest(line) }
+    }
+  }
+
+  Timer {
+    id: retryTimer
+    interval: 2000
+    repeat: false
+    onTriggered: {
+      root.socketRetries += 1
+      root.socketRetrying = true
+      sock.connected = false
+      sock.connected = true
+      root.socketRetrying = false
     }
   }
 
@@ -291,5 +342,18 @@ Singleton {
   Process {
     id: copyProc
     command: ["wl-copy"]
+  }
+
+  Process {
+    id: gatewayProc
+    command: [root.helper, "profile", "list"]
+    onExited: function (code) {
+      if (root.gatewayQueue.length > 0)
+        root.runGatewayQueue()
+      else {
+        listProc.running = false
+        listProc.running = true
+      }
+    }
   }
 }

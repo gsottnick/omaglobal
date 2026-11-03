@@ -11,6 +11,24 @@ Column {
 
   readonly property string fontFamily: OmaStore.pluginRoot ? Style.font.family : Style.font.family
 
+  readonly property var activeEntry: {
+    var profiles = OmaStore.profiles
+    for (var i = 0; i < profiles.length; i++) {
+      if (profiles[i] && profiles[i].name === OmaStore.activeProfile)
+        return profiles[i]
+    }
+    return null
+  }
+
+  readonly property var gatewayModel: {
+    var list = []
+    if (activeEntry && activeEntry.gateways && activeEntry.gateways.length)
+      list = activeEntry.gateways
+    if (list.length === 0)
+      list = OmaStore.gateways || []
+    return list
+  }
+
   Column {
     objectName: "setupCard"
     visible: !OmaStore.socketUp
@@ -97,6 +115,44 @@ Column {
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       text: "Add a profile with gpvpn profile add"
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      color: Color.muted
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: "Gateway"
+    }
+
+    Text {
+      objectName: "gatewayEmpty"
+      visible: root.gatewayModel.length === 0
+      width: parent.width
+      wrapMode: Text.WordWrap
+      textFormat: Text.PlainText
+      color: Color.muted
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: "Connect once and the portal's gateways show up here."
+    }
+
+    WidgetButton {
+      objectName: "gatewayAuto"
+      visible: root.gatewayModel.length > 0
+      text: "Automatic"
+      active: root.activeEntry === null || !root.activeEntry.gateway
+      onPressed: function (button) { OmaStore.chooseGateway("", "") }
+    }
+
+    Repeater {
+      model: root.gatewayModel
+      WidgetButton {
+        objectName: "gatewayButton"
+        text: modelData.name || modelData.host || ""
+        active: root.activeEntry !== null && root.activeEntry.gatewayName === (modelData.name || "")
+        onPressed: function (button) { OmaStore.chooseGateway(modelData.name || "", modelData.host || "") }
+      }
     }
 
     Column {

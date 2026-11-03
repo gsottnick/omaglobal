@@ -1,5 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
+import path from "node:path"
+import { statSync } from "node:fs"
 import { gpvpn, tempHome, run } from "./support.mjs"
 
 test("profiles round-trip and mode is always gateway", async () => {
@@ -21,6 +23,9 @@ test("profiles round-trip and mode is always gateway", async () => {
   assert.equal(named.profiles.find((item) => item.name === "Other").gatewayName, "KEEP-EXAMPLE")
   const active = JSON.parse((await run(gpvpn, ["profile", "set", "Other", "active", "yes"], env)).stdout)
   assert.equal(active.active, "Other")
+  const profileFile = path.join(env.XDG_CONFIG_HOME, "gp-vpn", "profiles.json")
+  assert.equal(statSync(profileFile).mode & 0o777, 0o600)
+  assert.equal(statSync(path.dirname(profileFile)).mode & 0o777, 0o700)
   const removed = JSON.parse((await run(gpvpn, ["profile", "remove", "Other"], env)).stdout)
   assert.equal(removed.profiles.length, 1)
   assert.equal(removed.profiles[0].name, "Default")

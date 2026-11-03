@@ -53,6 +53,11 @@ export async function writeSaml(env, body) {
   const record = path.join(env.XDG_DATA_HOME, "saml-record.json")
   const source = `import json, os, sys
 open(${JSON.stringify(record)}, "w").write(json.dumps({"argv": sys.argv, "env": {"GDK_BACKEND": os.environ.get("GDK_BACKEND"), "WEBKIT_DISABLE_DMABUF_RENDERER": os.environ.get("WEBKIT_DISABLE_DMABUF_RENDERER")}}))
+if "-C" in sys.argv:
+    jar = sys.argv[sys.argv.index("-C") + 1]
+    os.makedirs(os.path.dirname(jar), exist_ok=True)
+    fd = os.open(jar, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+    os.close(fd)
 sys.stdout.write(${JSON.stringify(body)})
 `
   await writeFile(script, source)

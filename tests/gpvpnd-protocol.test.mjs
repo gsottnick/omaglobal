@@ -1,8 +1,10 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import path from "node:path"
+import { spawnSync } from "node:child_process"
+import { statSync } from "node:fs"
 import {
-  COOKIE, tempHome, startDaemon, stopDaemon, waitForDaemon, collect, readText,
+  COOKIE, gpvpnd, fakeOpenconnect, tempHome, startDaemon, stopDaemon, waitForDaemon, collect, readText,
 } from "./support.mjs"
 
 const connect = (gateway = "") => ({
@@ -40,6 +42,35 @@ test("status is idle, a second connect is refused, and the cookie is redacted", 
     assert.equal(argv.includes(COOKIE), false)
     console.log("second connect refused")
     console.log("redacted cookie-shaped token")
+  } finally {
+    await stopDaemon(daemon.child)
+  }
+})
+
+test("a second daemon does not replace a live socket", async () => {
+  const { dir, env } = await tempHome()
+  const daemon = startDaemon(dir, env, "ok")
+  try {
+    await waitForDaemon(daemon.sock)
+    const inode = statSync(daemon.sock).ino
+    const second = spawnSync(gpvpnd, [
+      "--socket", daemon.sock,
+      "--openconnect", fakeOpenconnect,
+      "--state-file", path.join(dir, "state-other.json"),
+    ], {
+      encoding: "utf8",
+      timeout: 3000,
+      env: { ...env, FAKE_OC_DIR: path.join(dir, "oc2"), LISTEN_FDS: "", LISTEN_PID: "", LISTEN_FDNAMES: "" },
+    })
+    assert.notEqual(second.status, 0)
+    assert.match(second.stderr, /already being served/)
+    assert.equal(statSync(daemon.sock).ino, inode)
+    const status = await collect(daemon.sock, { cmd: "status" }, {
+      until: (rows) => rows.length > 0,
+      timeout: 2000,
+    })
+    assert.equal(status[0].state, "idle")
+    console.log("live socket was kept")
   } finally {
     await stopDaemon(daemon.child)
   }

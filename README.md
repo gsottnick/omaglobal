@@ -12,7 +12,7 @@ From this directory:
 tools/setup.sh
 ```
 
-That installs `openconnect`, clones the pinned gp-saml-gui, and starts the `gp-vpn.socket` systemd unit. Then add a profile and connect:
+That installs `openconnect` and the libraries the login window needs, clones the pinned gp-saml-gui, and starts the `gp-vpn.socket` systemd unit. Then add a profile and connect:
 
 ```
 gpvpn setup-check
@@ -24,6 +24,8 @@ gpvpn disconnect
 ```
 
 Replace the portal and username with yours. They stay in `gp-vpn/profiles.json` under your config directory, not in the bar.
+
+After a connection, the dropdown lists that portal's gateways. Automatic keeps the portal's choice. A gateway you pick is used the next time you connect.
 
 Until the socket exists, the bar dropdown shows only that setup command and a Copy button.
 

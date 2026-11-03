@@ -23,6 +23,11 @@ if [[ $mode == fail-gateway && $ug == gateway:* ]]; then
   echo "authentication failed" >&2
   exit 1
 fi
+if [[ $mode == hang ]]; then
+  sleep 30
+  exit 0
+fi
+sleep "${FAKE_OC_DELAY:-0}"
 if [[ ${FAKE_OC_LEAK:-} == 1 ]]; then
   echo "debug AAAAfakeCookieValue0123456789abcdef====="
 fi

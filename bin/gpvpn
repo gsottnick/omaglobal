@@ -22,6 +22,8 @@ import sys
 EXAMPLE_PORTAL = "vpn.example.com"
 EXAMPLE_USER = "user@example.com"
 SETUP_HINT = "Daemon socket is not available. Run tools/setup.sh once in a terminal."
+WEBKIT_HINT = "The login window needs webkit2gtk-4.1. Run tools/setup.sh once in a terminal."
+CONNECT_WAIT = 90
 _COOKIE_SHAPED = re.compile(r"[A-Za-z0-9+/=]{40,}")
 
 
@@ -85,14 +87,26 @@ def load_profiles() -> dict[str, object]:
     return {"profiles": profiles, "active": active}
 
 
+def tighten(path: str, mode: int) -> None:
+    """Restrict a private file. A failure is reported without its contents."""
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        print("Could not restrict a private VPN file.", file=sys.stderr)
+
+
 def save_profiles(store: dict[str, object]) -> None:
     path = profiles_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    tighten(directory, 0o700)
     blob = json.dumps(store, indent=2) + "\n"
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
+    handle = os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8")
+    try:
         handle.write(blob)
-    os.chmod(tmp, 0o600)
+    finally:
+        handle.close()
     os.replace(tmp, path)
 
 
@@ -148,6 +162,22 @@ def other_interface(usergroup: str) -> str:
     if not swapped or not sep:
         return usergroup
     return f"{swapped}:{rest}"
+
+
+def connect_wait() -> float:
+    """How long a connect may stay in auth or connecting before we give up.
+
+    A real gateway can take longer than a few seconds after the login window
+    closes. Giving up early used to look like a failure and start a second
+    connect against a tunnel that was still coming up.
+    """
+    raw = os.environ.get("GPVPN_CONNECT_TIMEOUT", "")
+    if raw:
+        try:
+            return max(0.2, float(raw))
+        except ValueError:
+            pass
+    return float(CONNECT_WAIT)
 
 
 def transact(payload: dict[str, object], terminal: bool, timeout: float = 12) -> tuple[int, dict[str, object] | None]:
@@ -212,13 +242,19 @@ def run_saml(portal: str, jar: str) -> tuple[int, str]:
     if not os.path.isfile(script):
         print("Login helper is not installed. Run tools/setup.sh once in a terminal.", file=sys.stderr)
         return 1, ""
-    os.makedirs(os.path.dirname(jar), exist_ok=True)
+    jar_dir = os.path.dirname(jar)
+    os.makedirs(jar_dir, exist_ok=True)
+    # The directory is the boundary. The login tool creates the jar itself,
+    # sometimes world-readable, and the jar is a reusable session secret.
+    tighten(jar_dir, 0o700)
     env, argv = saml_env_and_argv(portal, jar)
     try:
         completed = subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
     except OSError:
         print("Login helper could not be started.", file=sys.stderr)
         return 1, ""
+    if os.path.isfile(jar):
+        tighten(jar, 0o600)
     return completed.returncode, completed.stdout + "\n" + completed.stderr
 
 
@@ -263,12 +299,15 @@ def cmd_connect(profile_name: str, debug: bool) -> int:
     parsed = parse_saml(text)
     if parsed is None:
         if code != 0 and "OpenConnect command line" not in text:
-            print("Login cancelled", file=sys.stderr)
+            if "WebKit2" in text or "webkit2gtk" in text.lower():
+                print(WEBKIT_HINT, file=sys.stderr)
+            else:
+                print("Login cancelled", file=sys.stderr)
             return 1
         print("Could not read the login response", file=sys.stderr)
         return 3
     first = connect_payload(profile, parsed, parsed["usergroup"])
-    status, message = transact(first, terminal=True)
+    status, message = transact(first, terminal=True, timeout=connect_wait())
     if status == 4:
         return 4
     if message and message.get("type") == "error":
@@ -277,12 +316,17 @@ def cmd_connect(profile_name: str, debug: bool) -> int:
         store["active"] = profile["name"]
         save_profiles(store)
         return report(message, 0)
+    # Retry only after the tunnel has actually failed. A snapshot that is
+    # still auth or connecting means the first attempt is in progress.
+    state = str((message or {}).get("state") or "")
+    if state not in {"failed", "dropped"}:
+        return report(message, status or 5)
     # One automatic retry with the other interface string (portal <-> gateway).
     # This does not run the login helper again and does not report until it ends.
     alternate = other_interface(parsed["usergroup"])
     if alternate == parsed["usergroup"]:
         return report(message, 5)
-    status, second = transact(connect_payload(profile, parsed, alternate), terminal=True)
+    status, second = transact(connect_payload(profile, parsed, alternate), terminal=True, timeout=connect_wait())
     if status == 4:
         return 4
     if second and second.get("state") == "connected":
