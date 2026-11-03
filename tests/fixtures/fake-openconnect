@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Stand-in for openconnect. Records argv and stdin, then prints a canned
+# tunnel or fails. The cookie must arrive on stdin, never in argv.
+set -u
+dir=${FAKE_OC_DIR:?}
+mkdir -p "$dir"
+printf '%s\n' "---" "$@" >> "$dir/argv.log"
+printf '%s\n' "$@" > "$dir/argv"
+cat > "$dir/stdin"
+ug=""
+for arg in "$@"; do
+  case "$arg" in
+    gateway:*|portal:*) ug=$arg ;;
+  esac
+done
+printf '%s\n' "$ug" >> "$dir/usergroup.log"
+mode=${FAKE_OC_MODE:-ok}
+if [[ $mode == fail ]]; then
+  echo "authentication failed" >&2
+  exit 1
+fi
+if [[ $mode == fail-gateway && $ug == gateway:* ]]; then
+  echo "authentication failed" >&2
+  exit 1
+fi
+if [[ ${FAKE_OC_LEAK:-} == 1 ]]; then
+  echo "debug AAAAfakeCookieValue0123456789abcdef====="
+fi
+echo "2 gateway servers available:"
+echo "  PROD-EXAMPLE (vpn.example.com) [priority 1]"
+echo "Gateway: PROD-EXAMPLE"
+echo "Session authentication will expire at 2030-01-01T00:00:00"
+echo "Connected as 172.16.8.8, using SSL"
+if [[ $mode == exit-after ]]; then
+  exit 0
+fi
+sleep "${FAKE_OC_SLEEP:-60}"

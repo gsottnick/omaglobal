@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.gsottnick.omaglobal",
+  "name": "OmaGlobal",
+  "version": "0.1.0",
+  "author": "Gavin Sottnick",
+  "license": "GPL-3.0-or-later AND MIT",
+  "description": "Free GlobalProtect VPN in the Omarchy bar: connect/disconnect, gateway picker, SSO login with cached sessions, auto-connect, notifications. One-time setup script required (see README). Not affiliated with Palo Alto Networks or the GP Connect app.",
+  "homepage": "https://github.com/gsottnick/omaglobal",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "OmaGlobal",
+    "description": "Free GlobalProtect VPN control from the bar: SSO login, gateway picker, auto-connect, drop notifications.",
+    "category": "Network",
+    "aliases": ["vpn", "globalprotect", "gp", "openconnect"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "activeProfile": "Default",
+      "autoConnect": "Off",
+      "notifyConnect": "On",
+      "notifyDrop": "On",
+      "showIpInBar": "Off",
+      "showUsername": "Off"
+    },
+    "schema": [
+      { "key": "activeProfile", "type": "string", "label": "Active profile name", "defaultValue": "Default" },
+      { "key": "autoConnect", "type": "enum", "label": "Auto-connect at shell start", "options": ["On", "Off"], "defaultValue": "Off" },
+      { "key": "notifyConnect", "type": "enum", "label": "Notify on connect", "options": ["On", "Off"], "defaultValue": "On" },
+      { "key": "notifyDrop", "type": "enum", "label": "Notify on unexpected drop", "options": ["On", "Off"], "defaultValue": "On" },
+      { "key": "showIpInBar", "type": "enum", "label": "Show VPN IP in bar when connected", "options": ["On", "Off"], "defaultValue": "Off" },
+      { "key": "showUsername", "type": "enum", "label": "Include the VPN username in notifications", "options": ["On", "Off"], "defaultValue": "Off" }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+[Unit]
+Description=OmaGlobal VPN daemon
+Requires=gp-vpn.socket
+After=gp-vpn.socket
+
+[Service]
+ExecStart=/usr/local/bin/gpvpnd
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

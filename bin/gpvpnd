@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""gpvpnd — unprivileged-testable GlobalProtect tunnel daemon.
+
+The marketplace build never calls sudo or pkexec. Root, when it is used at
+all, is the systemd unit the user installed with tools/setup.sh. Tests pass
+--socket and --openconnect and run this as the normal user.
+
+The openconnect argument list is fixed. The prelogin cookie is written to
+the child's stdin and is never placed on the command line or in a log line.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+_COOKIE_SHAPED = re.compile(r"[A-Za-z0-9+/=]{40,}")
+_GATEWAY_LINE = re.compile(r"^\s*(.+?)\s+\(([^)]+)\)\s+\[priority\s+(\d+)\]\s*$")
+_GATEWAY_NAME = re.compile(r"^Gateway:\s*(.+?)\s*$")
+_CONNECTED = re.compile(r"Connected as\s+([0-9A-Fa-f:.]+)")
+_EXPIRES = re.compile(r"(?:will expire at|expires)\s+(\S+)")
+
+BUSY = {"auth", "connecting", "connected"}
+
+
+def redact(text: str) -> str:
+    return _COOKIE_SHAPED.sub("[redacted]", text or "")
+
+
+def openconnect_argv(binary: str, user: str, usergroup: str, server: str) -> list[str]:
+    """The only argv the daemon will ever exec. No cookie, no shell string."""
+    return [
+        binary,
+        "--protocol=gp",
+        "--useragent",
+        "PAN GlobalProtect",
+        "--user",
+        user,
+        "--os",
+        "linux-64",
+        "--usergroup",
+        usergroup,
+        "--passwd-on-stdin",
+        "--non-inter",
+        server,
+    ]
+
+
+def _plain_token(value: str) -> bool:
+    if not value or value.startswith("-"):
+        return False
+    return "\n" not in value and "\x00" not in value and len(value) <= 512
+
+
+class Daemon:
+    def __init__(self, openconnect: str, state_file: str, verbose: bool) -> None:
+        self.openconnect = openconnect
+        self.state_file = state_file
+        self.verbose = verbose
+        self.lock = threading.Lock()
+        self.clients: list[socket.socket] = []
+        self.proc: subprocess.Popen[str] | None = None
+        self.want_disconnect = False
+        self.stopping = False
+        self.server: socket.socket | None = None
+        self.state = "idle"
+        self.ip = ""
+        self.gateway = ""
+        self.user = ""
+        self.expires = ""
+        self.since = 0
+        self.message = ""
+        self.server_host = ""
+        self.gateways: list[dict[str, object]] = []
+        self.manual_gateway = ""
+        self.last_line = ""
+        self._load_state()
+
+    def public(self) -> dict[str, object]:
+        return {
+            "state": self.state,
+            "ip": self.ip,
+            "gateway": self.gateway,
+            "user": self.user,
+            "expires": self.expires,
+            "since": self.since,
+            "message": self.message,
+            "server": self.server_host,
+            "gateways": self.gateways,
+        }
+
+    def _load_state(self) -> None:
+        if not self.state_file or not os.path.isfile(self.state_file):
+            return
+        try:
+            saved = json.loads(open(self.state_file, encoding="utf-8").read())
+        except (OSError, json.JSONDecodeError):
+            return
+        # A previous summary is only a hint. No child is alive at startup,
+        # so a saved "connected" must not paint a live tunnel.
+        self.gateway = str(saved.get("gateway") or "")
+        self.user = ""
+        self.state = "idle"
+
+    def _save_state(self) -> None:
+        if not self.state_file:
+            return
+        blob = redact(json.dumps(self.public()))
+        tmp = self.state_file + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(self.state_file) or ".", exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(blob)
+                handle.write("\n")
+            os.replace(tmp, self.state_file)
+        except OSError:
+            return
+
+    def _broadcast(self, message: dict[str, object]) -> None:
+        data = (json.dumps(message) + "\n").encode()
+        with self.lock:
+            clients = list(self.clients)
+        dead: list[socket.socket] = []
+        for client in clients:
+            try:
+                client.sendall(data)
+            except OSError:
+                dead.append(client)
+        if dead:
+            with self.lock:
+                for client in dead:
+                    if client in self.clients:
+                        self.clients.remove(client)
+
+    def _send(self, client: socket.socket, message: dict[str, object]) -> None:
+        try:
+            client.sendall((json.dumps(message) + "\n").encode())
+        except OSError:
+            pass
+
+    def _enter(self, state: str, **fields: object) -> None:
+        with self.lock:
+            for key, value in fields.items():
+                setattr(self, key, value)
+            if state == "idle":
+                self.ip = ""
+                self.expires = ""
+                self.server_host = ""
+            self.state = state
+            if state == "connected":
+                self.since = int(time.time())
+                self.message = ""
+            snap = dict(self.public())
+        if self.verbose:
+            print(f"state {state}", file=sys.stderr)
+        self._save_state()
+        self._broadcast({"type": "state", **snap})
+
+    def _kill(self, proc: subprocess.Popen[str] | None) -> None:
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            try:
+                proc.terminate()
+            except OSError:
+                return
+
+    def dispatch(self, request: dict[str, object]) -> dict[str, object] | None:
+        command = request.get("cmd")
+        if command == "status":
+            with self.lock:
+                return {"type": "state", **self.public()}
+        if command == "disconnect":
+            return self.disconnect()
+        if command == "connect":
+            return self.start_connect(request)
+        return {"type": "error", "message": "Unknown command"}
+
+    def start_connect(self, request: dict[str, object]) -> dict[str, object]:
+        cookie = str(request.get("cookie") or "")
+        user = str(request.get("user") or "")
+        server = str(request.get("server") or "")
+        usergroup = str(request.get("usergroup") or "gateway:prelogin-cookie")
+        gateway = str(request.get("gateway") or "")
+        with self.lock:
+            if self.state in BUSY:
+                return {"type": "error", "message": "Already connecting or connected"}
+            if not _plain_token(server) or not _plain_token(user) or not _plain_token(usergroup):
+                return {"type": "error", "message": "Refusing an unsafe connect field"}
+            if not cookie or _COOKIE_SHAPED.search(usergroup):
+                return {"type": "error", "message": "Refusing an unsafe connect field"}
+            self.want_disconnect = False
+            self.user = user
+            self.server_host = server
+            self.manual_gateway = gateway
+            self.gateway = gateway
+            self.ip = ""
+            self.expires = ""
+            self.message = ""
+            self.gateways = []
+            self.last_line = ""
+            self.state = "auth"
+            self.since = int(time.time())
+            snap = dict(self.public())
+        self._save_state()
+        self._broadcast({"type": "state", **snap})
+        threading.Thread(
+            target=self._run_tunnel,
+            args=(cookie, user, server, usergroup),
+            daemon=True,
+        ).start()
+        return {"type": "accepted", **snap}
+
+    def disconnect(self) -> dict[str, object]:
+        with self.lock:
+            self.want_disconnect = True
+            proc = self.proc
+            self.state = "idle"
+            self.ip = ""
+            self.expires = ""
+            self.message = ""
+            self.server_host = ""
+            snap = dict(self.public())
+        self._kill(proc)
+        self._save_state()
+        self._broadcast({"type": "state", **snap})
+        return {"type": "accepted", **snap}
+
+    def _run_tunnel(self, cookie: str, user: str, server: str, usergroup: str) -> None:
+        argv = openconnect_argv(self.openconnect, user, usergroup, server)
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                text=True,
+            )
+        except OSError:
+            self._enter("failed", message="Could not start the tunnel")
+            return
+        with self.lock:
+            if self.want_disconnect or self.stopping:
+                self.proc = proc
+                intentional = True
+            else:
+                self.proc = proc
+                intentional = False
+        try:
+            if proc.stdin is not None:
+                proc.stdin.write(cookie + "\n")
+                proc.stdin.close()
+        except OSError:
+            pass
+        # The cookie leaves scope here. It is not stored on the daemon.
+        del cookie
+        if intentional:
+            self._kill(proc)
+        else:
+            self._enter("connecting")
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            self._on_output(line.rstrip("\n"))
+        proc.wait()
+        with self.lock:
+            self.proc = None
+            intentional = self.want_disconnect
+            self.want_disconnect = False
+            current = self.state
+        if intentional or self.stopping:
+            if current != "idle":
+                self._enter("idle")
+            return
+        if current == "connected":
+            self._enter("dropped", message="Tunnel closed")
+        else:
+            self._enter("failed", message=self.last_line or "Connection failed")
+
+    def _on_output(self, line: str) -> None:
+        with self.lock:
+            if self.want_disconnect or self.stopping:
+                return
+        redacted = redact(line)
+        self.last_line = redacted
+        self._broadcast({"type": "log", "line": redacted})
+        gateway_line = _GATEWAY_LINE.match(line)
+        if gateway_line:
+            entry = {
+                "name": gateway_line.group(1).strip(),
+                "host": gateway_line.group(2).strip(),
+                "priority": int(gateway_line.group(3)),
+            }
+            with self.lock:
+                self.gateways.append(entry)
+                if not self.manual_gateway:
+                    self.gateway = str(entry["name"])
+                current = self.state
+                snap = dict(self.public())
+            if current == "connected":
+                self._broadcast({"type": "state", **snap})
+            return
+        named = _GATEWAY_NAME.match(line)
+        if named:
+            with self.lock:
+                if not self.manual_gateway:
+                    self.gateway = named.group(1).strip()
+                current = self.state
+                snap = dict(self.public())
+            if current == "connected":
+                self._broadcast({"type": "state", **snap})
+            return
+        expiry = _EXPIRES.search(line)
+        if expiry:
+            with self.lock:
+                self.expires = expiry.group(1)
+                current = self.state
+                snap = dict(self.public())
+            if current == "connected":
+                self._broadcast({"type": "state", **snap})
+            return
+        connected = _CONNECTED.search(line)
+        if connected:
+            with self.lock:
+                self.ip = connected.group(1)
+                if not self.gateway:
+                    self.gateway = self.server_host
+            self._enter("connected")
+
+    def serve(self, path: str) -> None:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        if os.path.exists(path):
+            os.unlink(path)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        os.chmod(path, 0o660)
+        server.listen(8)
+        server.settimeout(0.5)
+        self.server = server
+
+        def _stop(_signum: int, _frame: object) -> None:
+            self.stopping = True
+            self._kill(self.proc)
+            try:
+                server.close()
+            except OSError:
+                pass
+
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
+        while not self.stopping:
+            try:
+                conn, _addr = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._client, args=(conn,), daemon=True).start()
+
+    def _client(self, conn: socket.socket) -> None:
+        with self.lock:
+            self.clients.append(conn)
+        buffer = b""
+        try:
+            while not self.stopping:
+                try:
+                    chunk = conn.recv(65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    raw, buffer = buffer.split(b"\n", 1)
+                    if not raw.strip():
+                        continue
+                    try:
+                        request = json.loads(raw.decode("utf-8"))
+                    except json.JSONDecodeError:
+                        self._send(conn, {"type": "error", "message": "Bad request"})
+                        continue
+                    if not isinstance(request, dict):
+                        self._send(conn, {"type": "error", "message": "Bad request"})
+                        continue
+                    reply = self.dispatch(request)
+                    if reply is not None:
+                        self._send(conn, reply)
+        finally:
+            with self.lock:
+                if conn in self.clients:
+                    self.clients.remove(conn)
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="gpvpnd")
+    parser.add_argument("--socket", default=os.environ.get("GPVPN_SOCKET") or "/run/gp-vpn/ctrl.sock")
+    parser.add_argument("--openconnect", default="openconnect")
+    parser.add_argument("--state-file", default="")
+    parser.add_argument("-v", action="store_true")
+    args = parser.parse_args(argv)
+    Daemon(args.openconnect, args.state_file, args.v).serve(args.socket)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
