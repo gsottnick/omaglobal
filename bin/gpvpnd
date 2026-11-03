@@ -13,6 +13,7 @@ the child's stdin and is never placed on the command line or in a log line.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -338,17 +339,49 @@ class Daemon:
                     self.gateway = self.server_host
             self._enter("connected")
 
+    def _adopt_listen_fd(self) -> socket.socket | None:
+        """Use the socket systemd already bound. Never unlink that path.
+
+        gp-vpn.socket is mode 0660 and group wheel. Replacing it drops the
+        client that caused activation and leaves a root-owned socket the bar
+        user cannot open. LISTEN_PID must be this process, same as sd_listen_fds.
+        """
+        raw_pid = os.environ.get("LISTEN_PID")
+        raw_count = os.environ.get("LISTEN_FDS")
+        if not raw_pid or raw_pid != str(os.getpid()) or not raw_count:
+            return None
+        try:
+            count = int(raw_count)
+        except ValueError:
+            return None
+        if count < 1:
+            return None
+        for key in ("LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES"):
+            os.environ.pop(key, None)
+        fd = 3
+        os.set_inheritable(fd, False)
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+        adopted = socket.socket(fileno=fd)
+        adopted.set_inheritable(False)
+        adopted.settimeout(0.5)
+        return adopted
+
     def serve(self, path: str) -> None:
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        if os.path.exists(path):
-            os.unlink(path)
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(path)
-        os.chmod(path, 0o660)
-        server.listen(8)
-        server.settimeout(0.5)
+        adopted = self._adopt_listen_fd()
+        if adopted is not None:
+            server = adopted
+        else:
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            if os.path.exists(path):
+                os.unlink(path)
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(path)
+            os.chmod(path, 0o660)
+            server.listen(8)
+            server.settimeout(0.5)
         self.server = server
 
         def _stop(_signum: int, _frame: object) -> None:

@@ -46,6 +46,8 @@ Singleton {
   property bool showUsername: false
   property bool autoTried: false
   property bool userAskedDisconnect: false
+  property bool profilesLoaded: false
+  property bool keepActive: false
   property int notifyConnectCount: 0
   property int notifyDisconnectCount: 0
   property int notifyDropCount: 0
@@ -55,7 +57,10 @@ Singleton {
   }
 
   function applySettings(settings) {
-    activeProfile = String(settings.activeProfile || "Default")
+    // "Default" here is the widget's unset value, not a saved choice.
+    // profiles.json is what the next start connects, once list returns.
+    if (!profilesLoaded && !keepActive)
+      activeProfile = String(settings.activeProfile || "Default")
     autoConnect = settings.autoConnect === true
     notifyConnect = settings.notifyConnect === true
     notifyDrop = settings.notifyDrop === true
@@ -65,7 +70,7 @@ Singleton {
   }
 
   function maybeAutoConnect() {
-    if (!autoConnect || autoTried || !socketUp)
+    if (!profilesLoaded || !autoConnect || autoTried || !socketUp)
       return
     if (phase !== "off" && phase !== "failed")
       return
@@ -198,6 +203,10 @@ Singleton {
 
   function chooseProfile(name) {
     activeProfile = String(name || "Default")
+    keepActive = true
+    activeProc.running = false
+    activeProc.command = [helper, "profile", "set", activeProfile, "active", "yes"]
+    activeProc.running = true
   }
 
   function copySetup() {
@@ -211,11 +220,13 @@ Singleton {
     try {
       var data = JSON.parse(text)
       profiles = data.profiles || []
-      if (!activeProfile && data.active)
+      if (!keepActive && data.active)
         activeProfile = String(data.active)
     } catch (error) {
       profiles = []
     }
+    profilesLoaded = true
+    maybeAutoConnect()
   }
 
   function reloadProfiles() {
@@ -264,6 +275,11 @@ Singleton {
 
   Process {
     id: cacheProc
+    command: [root.helper, "profile", "list"]
+  }
+
+  Process {
+    id: activeProc
     command: [root.helper, "profile", "list"]
   }
 

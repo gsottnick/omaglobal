@@ -101,6 +101,7 @@ def snapshot(plugin, store):
         "notifyDisconnectCount": read_prop(plugin, "notifyDisconnectCount", 0),
         "notifyDropCount": read_prop(plugin, "notifyDropCount", 0),
         "autoTried": read_prop(plugin, "autoTried", None),
+        "activeProfile": read_prop(plugin, "activeProfile", ""),
         "piped": piped,
         "executed": [list(command) for command in io.EXECUTED],
     }
@@ -127,6 +128,8 @@ def apply_step(step, plugin, store):
         push(argument)
     elif name == "disconnect":
         plugin.requestDisconnect()
+    elif name == "choose":
+        plugin.chooseProfile(argument)
     elif name == "settings":
         current = dict(read_prop(plugin, "settings", {}) or {})
         for pair in argument.split("|"):

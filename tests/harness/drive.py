@@ -79,9 +79,10 @@ def assert_clean(text: str, where: str) -> None:
         raise SystemExit(f"dirty {where}: HARNESS_FAIL\n{body}")
 
 
-def xdg_env(socket_path: str) -> dict[str, str]:
+def xdg_env(socket_path: str, root: str | None = None) -> dict[str, str]:
     env = os.environ.copy()
-    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    if root is None:
+        root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
     for key, name in (
         ("XDG_CONFIG_HOME", "config"),
         ("XDG_CACHE_HOME", "cache"),
@@ -97,7 +98,7 @@ def xdg_env(socket_path: str) -> dict[str, str]:
     return env
 
 
-def run_main(shell: Path, settings: dict, steps: str, socket_path: str, plugin: Path | None, trace: bool) -> subprocess.CompletedProcess[str]:
+def run_main(shell: Path, settings: dict, steps: str, socket_path: str, plugin: Path | None, trace: bool, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     command = [
         sys.executable, str(MAIN),
         "--omarchy", str(shell),
@@ -110,7 +111,13 @@ def run_main(shell: Path, settings: dict, steps: str, socket_path: str, plugin: 
         command.append("--trace")
     if plugin is not None:
         command.extend(["--plugin", str(plugin)])
-    return subprocess.run(command, env=xdg_env(socket_path), text=True, capture_output=True, check=False)
+    if env is None:
+        env = xdg_env(socket_path)
+    else:
+        env = dict(env)
+        env["GPVPN_SOCKET"] = socket_path
+        env["QT_QPA_PLATFORM"] = "offscreen"
+    return subprocess.run(command, env=env, text=True, capture_output=True, check=False)
 
 
 def snaps(proc: subprocess.CompletedProcess[str]) -> list[dict]:
@@ -243,6 +250,34 @@ def scenario_auto(shell: Path, enabled: bool) -> None:
         stop_fake(fake)
 
 
+def scenario_profile(shell: Path) -> None:
+    """A saved active profile loads over the widget default, and a dropdown choice is written back."""
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    env = xdg_env(os.path.join(root, "missing.sock"), root)
+    helper = [sys.executable, str(REPO / "bin" / "gpvpn")]
+    for args in (
+        ["profile", "add", "--name", "Default", "--portal", "vpn.example.com", "--username", "user@example.com"],
+        ["profile", "add", "--name", "Other", "--portal", "vpn.example.com", "--username", "user@example.com"],
+        ["profile", "set", "Other", "active", "yes"],
+    ):
+        seeded = subprocess.run(helper + args, env=env, text=True, capture_output=True, check=False)
+        if seeded.returncode != 0:
+            raise SystemExit(seeded.stderr)
+    proc = run_main(shell, BASE_SETTINGS, "choose:Default", env["GPVPN_SOCKET"], None, True, env)
+    assert_clean(proc.stdout + proc.stderr, "profile")
+    if proc.returncode != 0:
+        raise SystemExit(f"profile load failed\n{proc.stderr}\n{proc.stdout}")
+    rows = snaps(proc)
+    if len(rows) < 2 or rows[0]["activeProfile"] != "Other":
+        raise SystemExit(f"saved profile did not load {rows[0]['activeProfile'] if rows else 'none'}")
+    if rows[-1]["activeProfile"] != "Default":
+        raise SystemExit(f"dropdown choice did not stick {rows[-1]['activeProfile']}")
+    saved = json.loads((Path(env["XDG_CONFIG_HOME"]) / "gp-vpn" / "profiles.json").read_text(encoding="utf-8"))
+    if saved.get("active") != "Default":
+        raise SystemExit(f"profile set did not persist {saved.get('active')}")
+    print("PROFILE loaded=Other saved=Default")
+
+
 def scenario_negative(shell: Path) -> None:
     copy = Path(tempfile.mkdtemp(prefix="omaglobal-dimmed-"))
     for name in ("Panel.qml", "OmaStore.qml", "OmaPopup.qml", "qmldir"):
@@ -273,6 +308,7 @@ def main() -> int:
     scenario_states(shell)
     scenario_auto(shell, True)
     scenario_auto(shell, False)
+    scenario_profile(shell)
     scenario_negative(shell)
     print("CLEAN")
     return 0

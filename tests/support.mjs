@@ -129,6 +129,10 @@ export function startDaemon(dir, env, mode = "ok", extraEnv = {}) {
       FAKE_OC_MODE: mode,
       FAKE_OC_SLEEP: "30",
       ...extraEnv,
+      // A leaked activation environment must not steal the test socket.
+      LISTEN_FDS: "",
+      LISTEN_PID: "",
+      LISTEN_FDNAMES: "",
     },
     stdio: ["ignore", "pipe", "pipe"],
   })

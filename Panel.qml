@@ -52,9 +52,11 @@ Panel {
   readonly property string vpnIp: OmaStore.ip
   readonly property string vpnGateway: OmaStore.gateway
   readonly property string vpnExpires: OmaStore.expires
+  readonly property string activeProfile: OmaStore.activeProfile
   property bool pulseOn: true
 
   function requestDisconnect() { OmaStore.disconnect() }
+  function chooseProfile(name) { OmaStore.chooseProfile(name) }
 
   function onOff(value, fallback) {
     if (value === true || value === "On" || value === "on")
