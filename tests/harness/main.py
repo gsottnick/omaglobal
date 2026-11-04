@@ -113,7 +113,11 @@ def snapshot(plugin, store):
         status = plugin.findChild(QObject, "statusLine")
         error = plugin.findChild(QObject, "errorLine")
         connect_button = plugin.findChild(QObject, "connectButton")
+        if connect_button is None:
+            connect_button = plugin.findChild(QObject, "vpnConnectButton")
         phase_text = read_prop(status, "text", "")
+        if not phase_text:
+            phase_text = read_prop(error, "text", "")
     piped = [{"command": row["command"], "stdin": row["stdin"]} for row in io.PIPED]
     return {
         "phase": read_prop(plugin, "phase", ""),
@@ -142,6 +146,11 @@ def snapshot(plugin, store):
         "autoTried": read_prop(plugin, "autoTried", None),
         "activeProfile": read_prop(plugin, "activeProfile", ""),
         "screen": read_prop(store, "screen", "") if store is not None else "",
+        "heroStates": [w.objectName() for w in plugin.findChildren(QObject, "heroState")] if plugin is not None else [],
+        "dupCounts": {
+            n: len(plugin.findChildren(QObject, n))
+            for n in ("sessionCard", "welcomeCard", "setupCard", "editorCard", "vpnPopup")
+        } if plugin is not None else {},
         "stepText": read_prop(store, "stepText", "") if store is not None else "",
         "installStatus": read_prop(store, "installStatus", "") if store is not None else "",
         "installError": read_prop(store, "installError", "") if store is not None else "",
@@ -240,7 +249,7 @@ def apply_step(step, plugin, store):
         from PySide6.QtCore import QObject
 
         object_name, _, rest = argument.partition(":")
-        prop_name, _, value = rest.partition(":")
+        prop_name, _, value = rest.partition("=")
         target = find_anywhere(plugin, object_name)
         if target is None:
             raise SystemExit(f"prop target missing: {object_name}")
@@ -248,6 +257,31 @@ def apply_step(step, plugin, store):
             target.setProperty(prop_name, value == "true")
         else:
             target.setProperty(prop_name, int(value) if value.lstrip("-").isdigit() else value)
+    elif name == "wheel":
+        from PySide6.QtCore import QEventLoop, QPoint, QPointF, Qt, QTimer
+        from PySide6.QtGui import QGuiApplication, QWheelEvent
+
+        target = find_anywhere(plugin, argument.partition(":")[0])
+        if target is None:
+            raise SystemExit(f"wheel target missing: {argument}")
+        delta = int(argument.partition(":")[2])
+        width = float(target.property("width"))
+        height = float(target.property("height"))
+        pos = QPointF(width / 2, height / 2)
+        # A wheel scroll is a Begin / Update* / End phase sequence.
+        phases = [Qt.ScrollBegin, Qt.ScrollUpdate, Qt.ScrollUpdate,
+                  Qt.ScrollUpdate, Qt.ScrollUpdate, Qt.ScrollEnd]
+        for phase in phases:
+            step_delta = QPoint(0, delta // 2) if phase == Qt.ScrollUpdate else QPoint(0, 0)
+            event = QWheelEvent(
+                pos, QPointF(0, 0),
+                step_delta, QPoint(0, delta if phase != Qt.ScrollBegin and phase != Qt.ScrollEnd else 0),
+                Qt.NoButton, Qt.NoModifier, phase, False,
+            )
+            QGuiApplication.sendEvent(target, event)
+            loop = QEventLoop()
+            QTimer.singleShot(40, loop.quit)
+            loop.exec()
     elif name == "waitScreen":
         from PySide6.QtCore import QEventLoop, QTimer
 
@@ -262,6 +296,7 @@ def apply_step(step, plugin, store):
             loop.exec()
         raise SystemExit(f"screen never became {argument}")
     elif name == "shot":
+        from PySide6.QtCore import Qt as _Qt
         from PySide6.QtGui import QGuiApplication
 
         out = Path(argument)
@@ -274,13 +309,22 @@ def apply_step(step, plugin, store):
         image = images[0]
         for extra in images[1:]:
             combined = QImage(max(image.width(), extra.width()), image.height() + extra.height() + 8, QImage.Format_ARGB32)
-            combined.fill(Qt.transparent)
+            combined.fill(_Qt.transparent)
             painter = QPainter(combined)
             painter.drawImage(0, 0, image)
             painter.drawImage(0, image.height() + 8, extra)
             painter.end()
             image = combined
         image.save(str(out))
+        # Offscreen buffers can blend a stale frame; take a second grab after
+        # the first forces a fresh render pass and keep that one.
+        image2 = None
+        for w2 in windows:
+            img2 = w2.grabWindow()
+            if not img2.isNull() and img2.width() > 1:
+                image2 = img2 if image2 is None else image2
+        if image2 is not None:
+            image2.save(str(out))
         print(f"SHOT {out}", flush=True)
     elif name == "settings":
         current = dict(read_prop(plugin, "settings", {}) or {})

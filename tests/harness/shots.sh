@@ -5,7 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$(dirname "$HERE")")"
 PY="$REPO/.venv-harness/bin/python"
 MAIN="$HERE/main.py"
-OUT="${1:-/tmp/opencode/omaglobal-shots}"
+OUT="${1:-/tmp/opencode/omaglobal-shots-r2}"
 SHELL_DIR="${2:-/usr/share/omarchy/shell}"
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -89,7 +89,11 @@ echo "== 6 connecting steps + connected + error"
 run "open,waitScreen:main,push:auth,wait:500,shot:$OUT/05-signing-in.png,push:connecting,wait:400,shot:$OUT/06-starting-tunnel.png,push:connected,wait:600,shot:$OUT/07-connected.png,push:failed,wait:500,shot:$OUT/08-error.png"
 
 echo "== 7 editor + advanced"
-run "open,waitScreen:main,click:profileEditButton,wait:600,shot:$OUT/10-editor.png,click:editorAdvancedToggle,wait:800,shot:$OUT/11-advanced.png,prop:editorCard:height:1520,wait:1200,shot:$OUT/11b-advanced-full.png,prop:editorTop:visible:false,wait:800,shot:$OUT/11c-advanced-bottom.png"
+run "open,waitScreen:main,click:profileEditButton,wait:600,shot:$OUT/10-editor-top.png,click:editorAdvancedToggle,wait:800,shot:$OUT/10b-advanced-open.png"
+run "open,waitScreen:main,click:profileEditButton,wait:600,click:editorAdvancedToggle,wait:800,prop:vpnPopup:editorScrollTo=260,wait:1500,shot:$OUT/11-editor-middle.png,prop:vpnPopup:editorScrollTo=620,wait:1500,shot:$OUT/11b-editor-low.png,prop:vpnPopup:editorScrollTo=1100,wait:1500,shot:$OUT/11c-editor-bottom.png,prop:vpnPopup:editorScrollTo=1750,wait:1200,click:editorRemove,wait:400,shot:$OUT/11d-remove-armed.png"
+
+echo "== 7c manage section"
+run "open,waitScreen:main,click:profileEditButton,wait:600,click:editorAdvancedToggle,wait:600,prop:vpnPopup:editorScrollTo=1750,wait:1200,click:editorRemove,wait:400,shot:$OUT/13-manage.png"
 
 echo "== 8 password prompt"
 GPVPN_SOCKET="$SOCK" XDG_CONFIG_HOME="$ROOT/config" "$GPVPN" profile set Work authMethod password >/dev/null

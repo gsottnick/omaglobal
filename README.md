@@ -29,7 +29,7 @@ Sign-in is remembered between connections. **Forget saved sign-in** in the edito
 ## Known limits
 
 - WebKitGTK can paint a blank sign-in window on Hyprland. OmaGlobal sets `GDK_BACKEND=x11` and `WEBKIT_DISABLE_DMABUF_RENDERER=1` so the window draws. That is a workaround, not a fix in WebKit or Hyprland. See UPSTREAM.md.
-- Some gateways demand a Host Information Policy (HIP) report. OmaGlobal does not send one by default; if your gateway requires it, IT gives you a check script to put under Advanced options.
+- Some gateways demand a Host Information Policy (HIP) report. OmaGlobal does not send one by default; if your gateway requires it, IT gives you a check script to put under Advanced options. For safety that script (and any custom routing script) must be installed by an admin: root-owned with safe permissions on the whole path. The HIP script itself runs as your user, never as root.
 - A portal can hand back a cookie for the other interface. The connect retries once with the other interface string, then reports. It does not keep retrying.
 
 ## Optional: the command line

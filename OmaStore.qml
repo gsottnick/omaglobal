@@ -85,6 +85,8 @@ Singleton {
   // then bring the next one up.
   property bool switchPending: false
   property bool reconnectPending: false
+  // Shown while the old tunnel comes down for the next one.
+  property string switchingName: ""
   // The per-profile editor. A null name means "add a new VPN".
   property bool editorOpen: false
   property string editorName: ""
@@ -139,6 +141,18 @@ Singleton {
     var hours = Math.floor(n / 3600)
     var minutes = Math.floor((n % 3600) / 60)
     return hours + " h " + minutes + " min"
+  }
+
+  function expiresText() {
+    var raw = String(expires || "")
+    if (!raw)
+      return ""
+    var stamp = new Date(raw)
+    if (isNaN(stamp.getTime()))
+      return raw
+    var seconds = Math.floor((stamp.getTime() - Date.now()) / 1000)
+    var relative = seconds > 0 ? "in " + humanDuration(seconds) : "already passed"
+    return Qt.formatDateTime(stamp, "yyyy-MM-dd HH:mm") + " (" + relative + ")"
   }
 
   function upFor() {
@@ -324,6 +338,8 @@ Singleton {
     refreshStatus()
     if (visual === "connected" && prev !== "connected")
       notify("connect")
+    if (visual === "connected" || visual === "failed")
+      switchingName = ""
     if (visual === "off" && prev !== "off") {
       if (userAskedDisconnect) {
         userAskedDisconnect = false
@@ -366,6 +382,11 @@ Singleton {
     connectHeard = false
     connectCode = -1
     connectError = ""
+    // A new attempt starts with a clean slate: no stale failure text.
+    message = ""
+    phase = "off"
+    rawState = "idle"
+    refreshStatus()
     connectProc.running = false
     connectProc.running = true
   }
@@ -396,6 +417,9 @@ Singleton {
       userAskedDisconnect = false
       reconnectPending = false
       switchPending = true
+      switchingName = String(name || "")
+      message = ""
+      refreshStatus()
       sock.write('{"cmd":"disconnect"}\n')
       sock.flush()
       return
