@@ -54,6 +54,11 @@ Panel {
   readonly property string vpnExpires: OmaStore.expires
   readonly property string activeProfile: OmaStore.activeProfile
   property bool pulseOn: true
+  property real iconAngle: 0
+  property int pulseTick: 0
+  // The bar icon spins while the tunnel is being negotiated and pulses
+  // during sign-in. One timer for both; it stops when the phase ends.
+  readonly property bool busy: OmaStore.phase === "auth" || OmaStore.phase === "connecting"
 
   function requestDisconnect() { OmaStore.disconnect() }
   function chooseProfile(name) { OmaStore.chooseProfile(name) }
@@ -80,13 +85,18 @@ Panel {
   Component.onCompleted: applySettings()
   onSettingsChanged: applySettings()
 
-  // The only timer in the plugin: the auth-phase pulse. It does not poll.
+  // The only timer in the plugin: it drives the busy icon. It does not poll.
   Timer {
-    id: authPulse
-    interval: 700
+    id: busyTick
+    interval: 90
     repeat: true
-    running: OmaStore.phase === "auth"
-    onTriggered: root.pulseOn = !root.pulseOn
+    running: root.busy && !Style.reduceMotion
+    onTriggered: {
+      root.iconAngle = (root.iconAngle + 24) % 360
+      root.pulseTick += 1
+      if (root.pulseTick % 8 === 0)
+        root.pulseOn = !root.pulseOn
+    }
   }
 
   FontMetrics {
@@ -121,6 +131,14 @@ Panel {
             renderType: Text.NativeRendering
             color: root.iconColor
             opacity: OmaStore.phase === "auth" && !root.pulseOn ? 0.35 : 1
+            rotation: root.iconAngle
+            transformOrigin: Item.Center
+            Behavior on rotation {
+              RotationAnimation {
+                duration: Style.duration(90)
+                direction: RotationAnimation.Clockwise
+              }
+            }
           }
           Text {
             objectName: "barIp"
@@ -148,8 +166,8 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    contentWidth: Style.space(300)
-    contentHeight: card.fittedContentHeight(popup.implicitHeight, Style.space(520))
+    contentWidth: card.fittedContentWidth(Style.space(320))
+    contentHeight: card.fittedContentHeight(popup.implicitHeight, Style.space(560))
 
     OmaPopup {
       id: popup

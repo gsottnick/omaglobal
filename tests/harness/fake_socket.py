@@ -69,7 +69,8 @@ def handle(conn):
                     broadcast({"type": "state", **state})
                     send(conn, {"type": "accepted", **state})
                 elif cmd == "push":
-                    for key in ("state", "ip", "gateway", "user", "expires", "message", "server"):
+                    for key in ("state", "ip", "gateway", "user", "expires", "message", "server",
+                                "rxBytes", "txBytes", "iface", "since"):
                         if key in req:
                             state[key] = req[key]
                     broadcast({"type": "state", **state})

@@ -65,7 +65,10 @@ test("the panel keeps the theme rules that both shells enforce", async () => {
   assert.equal((popup.match(/\bTimer\b/g) || []).length, 0)
   assert.equal((store.match(/\bTimer\b/g) || []).length, 2)
   assert.match(store, /id:\s*retryTimer/)
-  assert.match(store, /id:\s*installTimer/)
+  assert.match(store, /id:\s*clockTimer/)
+  // Install progress is watched through a file, never a timer.
+  assert.match(store, /FileView\s*\{/)
+  assert.match(store, /watchChanges:\s*true/)
   assert.doesNotMatch(panel + popup + store, /setInterval|sudo|pkexec/)
   assert.match(panel, /Component\.onCompleted:\s*applySettings/)
   assert.match(panel, /onSettingsChanged:\s*applySettings/)

@@ -304,6 +304,25 @@ class FileView(QObject):
         self._print_errors = True
         self._block = False
         self._text = ""
+        self._watcher = None
+
+    def _apply_watch(self):
+        if self._watch_changes and self._path:
+            self._start_watch()
+            self._watcher.addPath(self._path)
+
+    def _start_watch(self):
+        # Mirror Quickshell's watchChanges: re-emit loaded when the file
+        # changes on disk, so widgets can react without timers.
+        if self._watcher is not None:
+            return
+        from PySide6.QtCore import QFileSystemWatcher
+
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.fileChanged.connect(self._on_watched)
+
+    def _on_watched(self, _path):
+        self.reload()
 
     def _get_path(self):
         return self._path
@@ -312,19 +331,24 @@ class FileView(QObject):
         self._path = value
         self.pathChanged.emit()
         self.reload()
+        if self._watch_changes and value:
+            self._start_watch()
+            self._watcher.addPath(value)
 
     path = Property(str, _get_path, _set_path, notify=pathChanged)
 
-    def _flag(attr, default):
+    def _flag(attr, default, after=None):
         def getter(self):
             return getattr(self, attr, default)
 
         def setter(self, value):
             setattr(self, attr, value)
+            if after is not None:
+                getattr(self, after)()
 
         return Property(bool, getter, setter)
 
-    watchChanges = _flag("_watch_changes", False)
+    watchChanges = _flag("_watch_changes", False, after="_apply_watch")
     printErrors = _flag("_print_errors", True)
     blockLoadingUntilLoaded = _flag("_block", False)
     blockLoading = _flag("_block_loading", False)   # Quickshell's name for it (Omarchy 4.5 sets it)
@@ -430,10 +454,14 @@ class Socket(QObject):
             self._parser.feed(data)
 
     def _on_disconnected(self):
-        self._on_ready_read()
-        if self._parser is not None:
-            self._parser.finish()
-        self.connectedChanged.emit()
+        try:
+            self._on_ready_read()
+            if self._parser is not None:
+                self._parser.finish()
+            self.connectedChanged.emit()
+        except RuntimeError:
+            # The QML side is already gone during teardown.
+            pass
 
     @Slot(str)
     def write(self, data):

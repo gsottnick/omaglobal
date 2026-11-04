@@ -1,53 +1,54 @@
 # OmaGlobal
 
-Free GlobalProtect control from the Omarchy bar. Connect and disconnect, pick a gateway, sign in once through the system browser window, and let a cached session reconnect quietly. One-time setup is required. OmaGlobal is not affiliated with Palo Alto Networks or the GP Connect app.
+Your company's GlobalProtect VPN, in the Omarchy bar. Type the portal address once, press Connect, sign in when the window appears, done. No command line after that.
 
-The bar widget (MIT) talks to a small helper and daemon (GPL-3.0-or-later) over a local socket. The widget never asks for a password and never calls sudo. You run the setup script yourself, once.
+OmaGlobal is not affiliated with Palo Alto Networks or the GP Connect app.
 
 ## Setup
 
-The bar dropdown lists what is already installed and what is missing. Press Install to add only the missing pieces. That opens a terminal and asks for your password there. If the tunnel program, the login window, and the background service are already there, the dropdown is the connect controls and Install is not shown. Or, from this directory:
+1. Add the plugin to the bar.
+2. Click its icon and press **Install**. A terminal opens and asks for your password once. When it says `Setup finished.`, you can close it. The dropdown moves on by itself.
+3. On the welcome screen, type your VPN portal address (like `vpn.yourcompany.com`) and press **Connect**. Sign in when the window appears. Ask IT if you don't know the address; they will call it the "GlobalProtect portal".
 
-```
-tools/setup.sh
-```
+That's it. The icon turns green when you are connected.
 
-That installs `openconnect` and the libraries the login window needs, clones the pinned gp-saml-gui, and starts the `gp-vpn.socket` systemd unit. In the dropdown, enter the portal address and username, then press Connect. The same steps from a terminal:
+## Using more than one VPN
 
-```
-gpvpn setup-check
-gpvpn profile add --name Default --portal vpn.example.com --username user@example.com
-gpvpn profile list
-gpvpn connect --profile Default
-gpvpn status
-gpvpn disconnect
-```
+Every portal you add shows up under "Your VPNs". Click one to switch: the old tunnel comes down and the new one comes up. Press **Edit** on any of them to rename it, set a different portal, pick a gateway, or remove it. The active one is the default that auto-connects (if you turn auto-connect on in the widget settings).
 
-Replace the portal and username with yours. They stay in `gp-vpn/profiles.json` under your config directory, not in the bar.
+## What the dropdown shows while connecting
 
-After a connection, the dropdown lists that portal's gateways. Automatic keeps the portal's choice. A gateway you pick is used the next time you connect.
+Three steps, in plain words: **Opening sign-in** (the sign-in window is coming up), **Signing in** (you may interact with it), **Starting tunnel**. When it lands, the card shows your VPN address, the gateway, how long you have been up, and how much data went through. **Disconnect** and **Reconnect** are right there. If something fails, the message says what happened and what to do next.
 
-Until those pieces are present, the dropdown shows the installed list, the missing list, and Install.
+## Advanced options
 
-## Uninstall
+Under **Edit → Advanced options** every openconnect setting that matters has a one-line explanation: gateway choice, portal vs gateway sign-in, password sign-in instead of SSO, the system type reported to the VPN, the host-check (HIP) script some gateways demand, server certificate pinning, company certificate authorities, client certificates, tunnel packet size, TLS-only mode on networks that block UDP, reconnect patience, and a custom routing script. You only touch these when IT tells you to.
 
-```
-systemctl disable --now gp-vpn.socket gp-vpn.service
-sudo rm /usr/local/bin/gpvpnd /etc/systemd/system/gp-vpn.service /etc/systemd/system/gp-vpn.socket
-sudo systemctl daemon-reload
-```
-
-## Settings
-
-Auto-connect, connect notifications, drop notifications, the VPN address in the bar, and the username in notifications are On/Off switches in the widget settings. The username switch is off. Notifications never include the login cookie.
+Sign-in is remembered between connections. **Forget saved sign-in** in the editor deletes it, so the next connect asks again.
 
 ## Known limits
 
-WebKitGTK can paint a blank login window on Hyprland. The helper sets `GDK_BACKEND=x11` and `WEBKIT_DISABLE_DMABUF_RENDERER=1` so the window can draw. That is a workaround, not a fix in WebKit or Hyprland.
+- WebKitGTK can paint a blank sign-in window on Hyprland. OmaGlobal sets `GDK_BACKEND=x11` and `WEBKIT_DISABLE_DMABUF_RENDERER=1` so the window draws. That is a workaround, not a fix in WebKit or Hyprland. See UPSTREAM.md.
+- Some gateways demand a Host Information Policy (HIP) report. OmaGlobal does not send one by default; if your gateway requires it, IT gives you a check script to put under Advanced options.
+- A portal can hand back a cookie for the other interface. The connect retries once with the other interface string, then reports. It does not keep retrying.
 
-Some gateways demand a HIP report. This version does not send one. If a gateway refuses the tunnel for that reason, the dropdown shows the daemon's message. See UPSTREAM.md.
+## Optional: the command line
 
-A portal can hand back a cookie for the other interface. The helper retries that connect once with the other interface string, then reports the failure. It does not keep retrying.
+Everything above can also be done from a terminal. This is never required.
+
+```
+tools/setup.sh                 # the same install the Install button runs
+gpvpn setup-check              # is the background service ready
+gpvpn profile add --name Work --portal vpn.yourcompany.com
+gpvpn connect --profile Work   # prompts/signs in as needed
+gpvpn status
+gpvpn disconnect
+gpvpn profile list             # JSON, all profiles
+gpvpn profile set Work noDtls On
+gpvpn forget Work              # delete the saved sign-in
+```
+
+Uninstall: remove the widget from the bar, then `systemctl disable --now gp-vpn.socket gp-vpn.service`, delete `/usr/local/bin/gpvpnd` and the two `gp-vpn.*` units in `/etc/systemd/system`, run `sudo systemctl daemon-reload`, and delete `~/.local/share/gp-vpn`, `~/.config/gp-vpn`, `~/.cache/gp-vpn`, `~/.local/state/gp-vpn`.
 
 ## License
 

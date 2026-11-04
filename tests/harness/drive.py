@@ -252,7 +252,7 @@ def scenario_connect(shell: Path, plugin: Path | None = None) -> None:
         if opened["opened"] is not True or opened["socketUp"] is not True or opened["phase"] != "off":
             raise SystemExit(f"connect did not start from a disconnected dropdown {opened}")
         empty_text = f"{empty['statusLine']}\n{empty['errorLine']}"
-        if empty["phase"] != "failed" or "portal" not in empty["statusLine"].lower() or "username" not in empty["statusLine"].lower():
+        if empty["phase"] != "failed" or "portal" not in empty["statusLine"].lower():
             raise SystemExit(f"empty connect did not ask for a portal {empty['phase']} {empty['statusLine']!r}")
         if "gpvpn" in empty_text or "setup.sh" in empty_text or connect_spawns(empty) != 0:
             raise SystemExit(f"empty connect ran a command {empty_text!r} spawns={connect_spawns(empty)}")
