@@ -124,7 +124,7 @@ Panel {
           Text {
             objectName: "barGlyph"
             anchors.verticalCenter: parent.verticalCenter
-            text: OmaStore.phase === "connected" ? "\u{f09c}" : "\u{f023}"
+            text: "\u{f132}"
             textFormat: Text.PlainText
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.bar.iconFont

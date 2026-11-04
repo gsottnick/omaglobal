@@ -25,21 +25,26 @@ Column {
     font.pixelSize: Style.font.bodySmall
   }
 
+  // The shell's popups color secondary text as the normal foreground at
+  // reduced opacity (network Panel.qml InfoLabel); follow that exactly.
   component HintCaption: Text {
     width: parent.width
     wrapMode: Text.WordWrap
     textFormat: Text.PlainText
-    color: Color.muted
+    color: Color.foreground
+    opacity: 0.6
     font.family: Style.font.family
     font.pixelSize: Style.font.bodySmall
   }
 
   // A big status block: state icon, state word, VPN name. Connecting gets
   // dots orbiting the shield; connected gets one ripple; failed fades down.
-  component StateHero: Item {
+  // A Column, so the height always covers every line it draws and nothing
+  // below the hero can overlap its text.
+  component StateHero: Column {
     id: hero
     width: parent.width
-    height: Style.space(92) + (connecting ? Style.space(20) : 0)
+    spacing: Style.space(2)
 
     property string stateWord: "Disconnected"
     property string who: ""
@@ -48,12 +53,19 @@ Column {
     property bool failed: false
     property int connectStep: 0 // 1 sign-in, 2 gateway, 3 tunnel
 
+    // One shield glyph (the font has exactly one); state is carried by
+    // color and weight of the dimming instead of a separate outline cut.
+    readonly property string iconGlyph: "\u{f132}"
+    readonly property color iconColor: connected ? Color.accent
+      : (failed ? Color.urgent : Color.foreground)
+    readonly property real iconOpacity: connected ? 1.0
+      : (failed ? 0.9 : 0.55)
+
     Item {
       id: visual
       width: Style.space(72)
       height: Style.space(72)
       anchors.horizontalCenter: parent.horizontalCenter
-      anchors.top: parent.top
       opacity: hero.failed ? 0.75 : 1
       Behavior on opacity {
         NumberAnimation { duration: Style.duration(300) }
@@ -61,12 +73,13 @@ Column {
 
       Text {
         anchors.centerIn: parent
-        text: hero.connected ? "\u{f09c}" : "\u{f023}"
+        text: hero.iconGlyph
         textFormat: Text.PlainText
         font.family: Style.font.family
         font.pixelSize: Style.font.display * 1.6
         renderType: Text.NativeRendering
-        color: hero.connected ? Color.accent : (hero.failed ? Color.urgent : Color.muted)
+        color: hero.iconColor
+        opacity: hero.iconOpacity
       }
 
       // Connected: one soft ring expanding out of the shield.
@@ -119,8 +132,6 @@ Column {
     Text {
       id: stateLine
       objectName: "heroState"
-      anchors.top: visual.bottom
-      anchors.topMargin: Style.space(4)
       width: parent.width
       horizontalAlignment: Text.AlignHCenter
       textFormat: Text.PlainText
@@ -132,23 +143,19 @@ Column {
 
     Text {
       id: whoLine
-      anchors.top: stateLine.bottom
-      anchors.topMargin: Style.space(2)
       width: parent.width
       horizontalAlignment: Text.AlignHCenter
       visible: hero.who !== ""
       textFormat: Text.PlainText
-      color: Color.muted
+      color: Color.foreground
+      opacity: 0.6
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       text: hero.who
     }
 
     // Three-step indicator while connecting: Sign in → Gateway → Tunnel.
-    // One single-color run: the offscreen renderer doubled multi-part rows.
     Text {
-      anchors.top: whoLine.bottom
-      anchors.topMargin: Style.space(2)
       width: parent.width
       horizontalAlignment: Text.AlignHCenter
       visible: hero.connecting && hero.connectStep > 0
@@ -158,6 +165,20 @@ Column {
       font.pixelSize: Style.font.bodySmall
       text: "Step " + hero.connectStep + " of 3 — "
         + ["", "Sign in", "Gateway", "Tunnel"][hero.connectStep]
+    }
+
+    Text {
+      objectName: "stepHint"
+      width: parent.width
+      horizontalAlignment: Text.AlignHCenter
+      visible: hero.connecting
+      wrapMode: Text.WordWrap
+      textFormat: Text.PlainText
+      color: Color.foreground
+      opacity: 0.7
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: root.stepHint
     }
   }
 
@@ -318,6 +339,13 @@ Column {
     OmaStore.openEditor(name || "")
   }
 
+  onRemoveArmedChanged: {
+    if (removeArmed) {
+      // Bring the confirm row above the pinned footer into view.
+      editorScrollTo = 999999
+    }
+  }
+
   function saveEdit() {
     OmaStore.saveEditor(edit)
     edit = {}
@@ -437,7 +465,7 @@ Column {
     objectName: "installingCard"
     visible: OmaStore.screen === "installing"
     width: parent.width
-    spacing: Style.space(10)
+    spacing: Style.space(4)
 
     StateHero {
       stateWord: "Installing"
@@ -587,20 +615,15 @@ Column {
     spacing: Style.space(10)
 
     StateHero {
-      stateWord: OmaStore.phase === "connected" ? "Connected"
+      stateWord: root.askPassword ? "Sign in to " + OmaStore.activeProfile
+        : (OmaStore.phase === "connected" ? "Connected"
         : (OmaStore.phase === "failed" ? (OmaStore.rawState === "dropped" ? "Dropped" : "Failed")
-        : (root.connecting ? "Connecting" : "Disconnected"))
-      who: OmaStore.activeProfile
+        : (root.connecting ? "Connecting" : "Disconnected")))
+      who: root.askPassword ? "" : OmaStore.activeProfile
       connecting: root.connecting
-      connected: OmaStore.phase === "connected"
-      failed: OmaStore.phase === "failed"
+      connected: OmaStore.phase === "connected" && !root.askPassword
+      failed: OmaStore.phase === "failed" && !root.askPassword
       connectStep: root.connectStep
-    }
-
-    RowCaption {
-      objectName: "stepHint"
-      visible: root.connecting
-      text: root.stepHint
     }
 
     // Password prompt for password profiles, once per attempt.
@@ -713,7 +736,7 @@ Column {
 
     Text {
       objectName: "errorLine"
-      visible: OmaStore.phase === "failed" && OmaStore.message !== ""
+      visible: OmaStore.phase === "failed" && !root.askPassword && OmaStore.message !== ""
       width: parent.width
       wrapMode: Text.WordWrap
       textFormat: Text.PlainText
@@ -725,7 +748,7 @@ Column {
 
     HintCaption {
       objectName: "errorAdvice"
-      visible: OmaStore.phase === "failed" && OmaStore.message !== ""
+      visible: OmaStore.phase === "failed" && !root.askPassword && OmaStore.message !== ""
       text: "Once the problem is fixed, press the button below to try again."
     }
 

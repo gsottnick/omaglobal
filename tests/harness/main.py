@@ -44,7 +44,8 @@ PUSH = {
         "iface": "tun0",
         "since": int(time.time()) - 600,
     },
-    "failed": {"state": "dropped", "message": "Tunnel closed"},
+    "failed": {"state": "dropped",
+               "message": "The connection ended unexpectedly. Check your internet connection."},
 }
 
 
@@ -101,6 +102,51 @@ def read_prop(obj, name, default=None):
     return default if value is None else value
 
 
+def find_text_overlaps(plugin):
+    """Fail condition from the r3 review: two visible text items whose
+    rectangles intersect without one containing the other."""
+    from PySide6.QtCore import QObject
+
+    overlaps = []
+    texts = [i for i in plugin.findChildren(QObject)
+             if i.inherits("Text") and i.property("visible") is not False]
+    # Text items in hidden subtrees report visible=True in PySide; filter by
+    # effective visibility: map their rect to the window and require a size.
+    for a in range(len(texts)):
+        item_a = texts[a]
+        rect_a = item_a.mapRectToScene(item_a.boundingRect())
+        if rect_a.width() <= 0 or rect_a.height() <= 0:
+            continue
+        for b in range(a + 1, len(texts)):
+            item_b = texts[b]
+            # skip ancestor/descendant pairs
+            parent = item_b.parentItem()
+            while parent is not None:
+                if parent is item_a:
+                    break
+                parent = parent.parentItem()
+            if parent is item_a:
+                continue
+            parent = item_a.parentItem()
+            while parent is not None:
+                if parent is item_b:
+                    break
+                parent = parent.parentItem()
+            if parent is item_b:
+                continue
+            rect_b = item_b.mapRectToScene(item_b.boundingRect())
+            if rect_b.width() <= 0 or rect_b.height() <= 0:
+                continue
+            if item_a.scene() is not item_b.scene():
+                continue
+            common = rect_a.intersected(rect_b)
+            if common.width() > 2 and common.height() > 2:
+                overlaps.append(
+                    f"{item_a.objectName() or item_a.property('text')}({int(rect_a.x())},{int(rect_a.y())})"
+                    f" X {item_b.objectName() or item_b.property('text')}({int(rect_b.x())},{int(rect_b.y())})")
+    return overlaps
+
+
 def snapshot(plugin, store):
     from PySide6.QtCore import QObject
 
@@ -146,6 +192,7 @@ def snapshot(plugin, store):
         "autoTried": read_prop(plugin, "autoTried", None),
         "activeProfile": read_prop(plugin, "activeProfile", ""),
         "screen": read_prop(store, "screen", "") if store is not None else "",
+        "overlaps": find_text_overlaps(plugin) if plugin is not None else [],
         "heroStates": [w.objectName() for w in plugin.findChildren(QObject, "heroState")] if plugin is not None else [],
         "dupCounts": {
             n: len(plugin.findChildren(QObject, n))
@@ -376,6 +423,13 @@ def main() -> int:
         store = harness.property("store")
         if plugin is None or store is None:
             print("HARNESS_FAIL", file=sys.stderr)
+            status["code"] = 1
+            app.quit()
+            return
+        # The r3 rule: a run whose visible texts overlap fails outright.
+        bad = find_text_overlaps(plugin)
+        if bad and not os.environ.get("HARNESS_ALLOW_OVERLAPS"):
+            print("HARNESS_FAIL overlapping text: " + "; ".join(bad), file=sys.stderr)
             status["code"] = 1
             app.quit()
             return

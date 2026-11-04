@@ -120,6 +120,14 @@ def run_main(shell: Path, settings: dict, steps: str, socket_path: str, plugin: 
     return subprocess.run(command, env=env, text=True, capture_output=True, check=False)
 
 
+def require_no_overlaps(rows: list[dict], where: str) -> None:
+    """The r3 review requires failing when sibling text rectangles intersect."""
+    for index, row in enumerate(rows):
+        bad = row.get("overlaps") or []
+        if bad:
+            raise SystemExit(f"overlapping text in {where} snapshot {index}: {'; '.join(bad)}")
+
+
 def snaps(proc: subprocess.CompletedProcess[str]) -> list[dict]:
     rows = []
     for line in proc.stdout.splitlines():
@@ -169,6 +177,7 @@ def scenario_setup(shell: Path) -> None:
     if proc.returncode != 0:
         raise SystemExit(f"setup load failed\n{proc.stderr}")
     row = snaps(proc)[-1]
+    require_no_overlaps([row], "scenario")
     command = str(row["setupCommand"])
     if not (row["setupVisible"] is True and command.endswith("tools/setup.sh") and row["phase"] == "off" and row["socketUp"] is False):
         raise SystemExit(f"setup card mismatch {row}")
@@ -185,6 +194,7 @@ def scenario_states(shell: Path) -> None:
         if proc.returncode != 0:
             raise SystemExit(f"states load failed\n{proc.stderr}\n{proc.stdout}")
         rows = snaps(proc)
+        require_no_overlaps(rows, "scenario")
         if len(rows) != 13:
             raise SystemExit(f"expected 13 snapshots, got {len(rows)}")
         expect = [
@@ -244,6 +254,8 @@ def scenario_connect(shell: Path, plugin: Path | None = None) -> None:
         if proc.returncode != 0:
             raise SystemExit(f"connect load failed\n{proc.stderr}\n{proc.stdout}")
         rows = snaps(proc)
+        require_no_overlaps(rows, "scenario")
+        require_no_overlaps(rows, "scenario")
         if len(rows) < 4:
             raise SystemExit(f"connect snapshots missing {len(rows)}")
         opened = rows[1]
@@ -297,6 +309,7 @@ def scenario_auto(shell: Path, enabled: bool) -> None:
         if proc.returncode != 0:
             raise SystemExit(proc.stderr)
         row = snaps(proc)[-1]
+        require_no_overlaps([row], "scenario")
         count = connect_spawns(row)
         expect = 1 if enabled else 0
         if count != expect or (enabled and row["autoTried"] is not True):
@@ -325,6 +338,7 @@ def scenario_profile(shell: Path) -> None:
     if proc.returncode != 0:
         raise SystemExit(f"profile load failed\n{proc.stderr}\n{proc.stdout}")
     rows = snaps(proc)
+    require_no_overlaps(rows, "scenario")
     if len(rows) < 2 or rows[0]["activeProfile"] != "Other":
         raise SystemExit(f"saved profile did not load {rows[0]['activeProfile'] if rows else 'none'}")
     if rows[-1]["activeProfile"] != "Default":

@@ -133,14 +133,20 @@ Singleton {
   }
 
   function humanDuration(totalSeconds) {
+    // Grows to the largest sensible unit so nothing ever gets truncated.
     var n = Math.max(0, Number(totalSeconds) || 0)
     if (n < 60)
       return n + " s"
     if (n < 3600)
       return Math.floor(n / 60) + " min"
-    var hours = Math.floor(n / 3600)
-    var minutes = Math.floor((n % 3600) / 60)
-    return hours + " h " + minutes + " min"
+    if (n < 86400) {
+      var hours = Math.floor(n / 3600)
+      var minutes = Math.floor((n % 3600) / 60)
+      return minutes > 0 ? hours + " h " + minutes + " m" : hours + " h"
+    }
+    if (n < 86400 * 365)
+      return Math.floor(n / 86400) + " days"
+    return Math.round(n / (86400 * 365) * 10) / 10 + " years"
   }
 
   function expiresText() {

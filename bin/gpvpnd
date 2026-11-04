@@ -109,6 +109,48 @@ def _validate_admin_path(path: str, uid: int) -> str | None:
     return None
 
 
+def open_checked(resolved_path: str, uid: int, gid: int | None = None) -> tuple[int, str | None]:
+    """Open a resolved, non-symlink path with ownership checks.
+
+    Opens the realpath with O_RDONLY|O_NOFOLLOW|O_CLOEXEC so the final
+    component cannot be swapped mid-open.  Runs fstat on the fd to verify
+    ownership and readability using the same rules as _validate_user_path.
+
+    Returns (fd, None) on success, or (-1, error_message) on failure.
+    The caller must close the fd on error.
+    """
+    try:
+        fd = os.open(
+            resolved_path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError:
+        return (-1, "That file does not exist.")
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return (-1, "That file is not accessible.")
+    # Must be owned by peer uid or root
+    if st.st_uid != uid and st.st_uid != 0:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    # Check read permission for peer
+    can_read = False
+    if st.st_uid == uid:
+        if st.st_mode & 0o400:
+            can_read = True
+    elif st.st_uid == 0:
+        if gid and (st.st_mode & 0o040) and st.st_gid == gid:
+            can_read = True
+        if st.st_mode & 0o004:
+            can_read = True
+    if not can_read:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    return (fd, None)
+
+
 def _validate_user_path(path: str, uid: int, gid: int | None = None) -> str | None:
     """Validate a user-owned file path.
 
@@ -279,7 +321,7 @@ def _validate_options(
     """Validate whitelist options against the connect request.
 
     Returns an error string on failure; ``None`` on success.
-    Side effects: none — ``build_argv`` inserts validated values into argv.
+    No side effects — does not open any files.
     """
     if not options:
         return None
@@ -348,6 +390,37 @@ def _validate_options(
         else:
             return f"Unknown option: {key}"
 
+    return None
+
+
+def _open_user_files(
+    options: dict | None,
+    peer_uid: int | None = None,
+    open_files: dict[str, tuple[int, str | None]] | None = None,
+) -> str | None:
+    """Open USER_KEYS files with O_RDONLY|O_NOFOLLOW after validation.
+
+    Called only after ``_validate_options`` succeeds.  Stores (fd, None)
+    tuples in *open_files* for each successfully opened file.  Returns an
+    error string on failure; the caller must close any surviving fds.
+    """
+    if not options or open_files is None:
+        return None
+
+    for key, value in options.items():
+        if key not in _USER_KEYS:
+            continue
+        gid = None
+        try:
+            pw = pwd.getpwuid(peer_uid)  # type: ignore[arg-type]
+            gid = pw.pw_gid
+        except KeyError:
+            pass
+        resolved = os.path.realpath(value)
+        fd, open_err = open_checked(resolved, peer_uid, gid)  # type: ignore[arg-type]
+        if open_err:
+            return open_err
+        open_files[key] = (fd, None)
     return None
 
 
@@ -593,7 +666,28 @@ class Daemon:
             except KeyError:
                 pass  # no passwd entry; csd_user stays None
 
-        # Validate options against whitelist
+        # Security: csdWrapper requires --csd-user to prevent root from
+        # running the user's script directly.  Refuse when we can't
+        # resolve the peer's username.
+        if csd_user is None and isinstance(options, dict) and "csdWrapper" in options:
+            return {"type": "error", "message": "Cannot determine your user name for csdWrapper. Contact IT."}
+
+        # Validate options against whitelist (pure check, no side effects)
+        err = _validate_options(options, password_mode, usergroup, uid)
+        if err:
+            return {"type": "error", "message": err}
+
+        # Open USER_KEYS files with O_NOFOLLOW for TOCTOU safety.
+        open_files: dict[str, tuple[int, str | None]] = {}
+        open_err = _open_user_files(options, uid, open_files)
+        if open_err:
+            return {"type": "error", "message": open_err}
+        # Replace file paths in options with /dev/fd/N so build_argv
+        # uses the fd-based paths in the final argv.
+        for key, (fd, _) in open_files.items():
+            if key in options and isinstance(options[key], str):
+                options[key] = f"/dev/fd/{fd}"
+        # Build argv with validated, fd-based paths
         args, err = build_argv(
             self.openconnect, user, usergroup, server,
             options=options, password_mode=password_mode,
@@ -601,6 +695,9 @@ class Daemon:
         )
         if err:
             return {"type": "error", "message": err}
+        # Store validated fds on self so _run_tunnel can pass them to Popen.
+        with self.lock:
+            self._validated_fds = {k: v[0] for k, v in open_files.items() if v[1] is None}
 
         with self.lock:
             if self.state in BUSY:
@@ -644,6 +741,12 @@ class Daemon:
         return {"type": "accepted", **snap}
 
     def _run_tunnel(self, argv: list[str], password: str, cookie: str) -> None:
+        # Collect file descriptors that must stay open for the child.
+        # These were opened during validation with O_NOFOLLOW and point to
+        # the verified inode; they survive symlink swaps.
+        fds_to_pass: list[int] = []
+        with self.lock:
+            fds_to_pass = list(getattr(self, "_validated_fds", {}).values())
         try:
             proc = subprocess.Popen(
                 argv,
@@ -652,10 +755,18 @@ class Daemon:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
                 text=True,
+                pass_fds=fds_to_pass,
             )
         except OSError:
             self._enter("failed", message="Could not start the tunnel")
             return
+        # Close parent-side copies of the validated fds immediately.
+        # The child keeps them via pass_fds.
+        for fd in fds_to_pass:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         with self.lock:
             if self.want_disconnect or self.stopping:
                 self.proc = proc
@@ -693,7 +804,7 @@ class Daemon:
                 self._enter("idle")
             return
         if current == "connected":
-            self._enter("dropped", message="Tunnel closed")
+            self._enter("dropped", message="The connection ended unexpectedly. Check your internet connection.")
         else:
             msg = map_failure(self.last_line)
             if msg is None:

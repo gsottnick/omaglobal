@@ -31,6 +31,14 @@ sleep "${FAKE_OC_DELAY:-0}"
 if [[ ${FAKE_OC_LEAK:-} == 1 ]]; then
   echo "debug AAAAfakeCookieValue0123456789abcdef====="
 fi
+# Read from any /dev/fd/N paths in argv (TOCTOU-safe fd approach)
+for arg in "$@"; do
+  if [[ "$arg" =~ ^/dev/fd/[0-9]+$ ]]; then
+    if cat "$arg" > "$dir/fd_verify" 2>/dev/null; then
+      break
+    fi
+  fi
+done
 echo "2 gateway servers available:"
 echo "  PROD-EXAMPLE (vpn.example.com) [priority 1]"
 echo "Gateway: PROD-EXAMPLE"

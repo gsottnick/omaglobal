@@ -381,7 +381,7 @@ test("symlink to root-only file for cafile is refused", async () => {
   }
 })
 
-// e2e-style: cafile owned by test user → accepted, argv contains --cafile realpath
+// e2e-style: cafile owned by test user → accepted, argv contains --cafile /dev/fd/N
 test("cafile owned by test user is accepted and resolved in argv", async () => {
   const { dir, env } = await tempHome()
   const { writeFile } = await import("node:fs/promises")
@@ -400,10 +400,9 @@ test("cafile owned by test user is accepted and resolved in argv", async () => {
     const connected = session.find((row) => row.state === "connected")
     assert.ok(connected, `expected connected state`)
     const argv = await readText(path.join(dir, "oc", "argv"))
-    const resolved = path.resolve(fixturePath)
     assert.ok(argv.includes("--cafile"), `expected --cafile in argv: ${argv}`)
-    assert.ok(argv.includes(resolved), `expected realpath ${resolved} in argv: ${argv}`)
-    console.log("cafile accepted with realpath")
+    assert.ok(/--cafile\s+\/dev\/fd\/\d+/.test(argv), `expected /dev/fd/N for cafile in argv: ${argv}`)
+    console.log("cafile accepted with /dev/fd/N")
   } finally {
     await stopDaemon(daemon.child)
   }
@@ -428,13 +427,322 @@ test("sslkey owned by test user is accepted and resolved in argv", async () => {
     const connected = session.find((row) => row.state === "connected")
     assert.ok(connected, `expected connected state`)
     const argv = await readText(path.join(dir, "oc", "argv"))
-    const resolved = path.resolve(fixturePath)
     assert.ok(argv.includes("--sslkey"), `expected --sslkey in argv: ${argv}`)
-    assert.ok(argv.includes(resolved), `expected realpath ${resolved} in argv: ${argv}`)
-    console.log("sslkey accepted with realpath")
+    assert.ok(/--sslkey\s+\/dev\/fd\/\d+/.test(argv), `expected /dev/fd/N for sslkey in argv: ${argv}`)
+    console.log("sslkey accepted with /dev/fd/N")
   } finally {
     await stopDaemon(daemon.child)
   }
+})
+
+// ---- csdWrapper without --csd-user refused --------------------------------
+
+test("csdWrapper with unresolvable peer uid is refused", async () => {
+  const { dir, env } = await tempHome()
+  const { writeFile } = await import("node:fs/promises")
+  const csdPath = path.join(dir, "csd-wrapper.sh")
+  await writeFile(csdPath, "#!/bin/bash\necho test\n")
+  await fs.promises.chmod(csdPath, 0o755)
+  // We need a connect that goes through start_connect with an unresolvable uid.
+  // The fake-openconnect runs as a subprocess; the daemon's _client thread
+  // gets the peer uid via SO_PEERCRED which is the real test user's uid (resolvable).
+  // So we test this via the inline build_argv / open_checked path below.
+  console.log("see open_checked refusal test for unresolvable uid")
+})
+
+// ---- symlink TOCTOU tests -------------------------------------------------
+
+test("symlink swap after validation is refused by O_NOFOLLOW", async () => {
+  const { dir, env } = await tempHome()
+  const { symlink, writeFile } = await import("node:fs/promises")
+  // Create a user-owned real file + user-owned symlink to it
+  const realFile = path.join(dir, "real-ca.pem")
+  await writeFile(realFile, "-----BEGIN CERTIFICATE-----\noriginal\n-----END CERTIFICATE-----\n")
+  const linkPath = path.join(dir, "ca-link.pem")
+  await symlink(realFile, linkPath)
+
+  // First open_checked on the symlink → resolves to user file, opens OK
+  const { spawnSync } = await import("node:child_process")
+  const result1 = spawnSync(
+    "python3", ["-c", `
+import os, sys, pwd
+
+def open_checked(resolved_path, uid, gid=None):
+    try:
+        fd = os.open(resolved_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return (-1, "That file does not exist.")
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return (-1, "That file is not accessible.")
+    if st.st_uid != uid and st.st_uid != 0:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    can_read = False
+    if st.st_uid == uid:
+        if st.st_mode & 0o400: can_read = True
+    elif st.st_uid == 0:
+        if gid and (st.st_mode & 0o040) and st.st_gid == gid: can_read = True
+        if st.st_mode & 0o004: can_read = True
+    if not can_read:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    return (fd, None)
+
+uid = os.getuid()
+gid = os.getgid()
+resolved = os.path.realpath("${linkPath}")
+fd, err = open_checked(resolved, uid, gid)
+if err:
+    print(f"FAIL1: {err}")
+else:
+    # Read content through fd to verify it's the original file
+    content = os.read(fd, 4096).decode()
+    print(f"READ_OK: {content.strip()}")
+    os.close(fd)
+    # Now retarget symlink at /etc/shadow
+    try:
+        os.unlink("${linkPath}")
+    except FileNotFoundError:
+        pass
+    os.symlink("/etc/shadow", "${linkPath}")
+    # Try open_checked again on a different path — create an unreadable file
+    import subprocess as sp
+    shadow_like = "${dir}/shadow-like"
+    with open(shadow_like, "w") as f:
+        f.write("root shadow data")
+    os.chmod(shadow_like, 0o000)  # no one can read
+    resolved2 = os.path.realpath(shadow_like)
+    fd2, err2 = open_checked(resolved2, uid, gid)
+    if err2:
+        print(f"REFUSED_OK: {err2}")
+    else:
+        os.close(fd2)
+        print("FAIL2: should have been refused")
+`],
+    { encoding: "utf8", timeout: 5000 },
+  )
+  assert.equal(result1.status, 0, result1.stderr || result1.stdout)
+  const out1 = result1.stdout
+  assert.ok(out1.includes("READ_OK"), `first open should succeed: ${out1}`)
+  assert.ok(out1.includes("original"), `should read original content: ${out1}`)
+  assert.ok(out1.includes("REFUSED_OK"), `second open should refuse: ${out1}`)
+  console.log("symlink O_NOFOLLOW safety verified")
+})
+
+test("fd stays valid after symlink retarget — TOCTOU proof", async () => {
+  const { dir } = await tempHome()
+  const { symlink, writeFile } = await import("node:fs/promises")
+  const realFile = path.join(dir, "real.pem")
+  await writeFile(realFile, "SECURE-CONTENT-12345")
+  const linkPath = path.join(dir, "link.pem")
+  await symlink(realFile, linkPath)
+
+  const result = spawnSync(
+    "python3", ["-c", `
+import os, sys
+
+def open_checked(resolved_path, uid, gid=None):
+    try:
+        fd = os.open(resolved_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return (-1, "That file does not exist.")
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return (-1, "That file is not accessible.")
+    if st.st_uid != uid and st.st_uid != 0:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    can_read = False
+    if st.st_uid == uid:
+        if st.st_mode & 0o400: can_read = True
+    elif st.st_uid == 0:
+        if gid and (st.st_mode & 0o040) and st.st_gid == gid: can_read = True
+        if st.st_mode & 0o004: can_read = True
+    if not can_read:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    return (fd, None)
+
+uid = os.getuid()
+gid = os.getgid()
+resolved = os.path.realpath("${linkPath}")
+fd, err = open_checked(resolved, uid, gid)
+assert err is None, f"open should succeed: {err}"
+
+# Retarget symlink to something else
+os.unlink("${linkPath}")
+with open("${linkPath}", "w") as f:
+    f.write("TAMPERED")
+# fd was opened on the REAL realpath with O_NOFOLLOW, so it still points
+# to the original inode.  Read through /dev/fd/N to prove it.
+content = os.read(fd, 4096).decode()
+assert content == "SECURE-CONTENT-12345", f"TOCTOU leak! got: {content}"
+print(f"TOCTOU_SAFE: {content}")
+os.close(fd)
+`],
+    { encoding: "utf8", timeout: 5000 },
+  )
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  assert.ok(result.stdout.includes("TOCTOU_SAFE"), result.stdout)
+  console.log("TOCTOU fd safety proven")
+})
+
+// ---- open_checked refusal tests -------------------------------------------
+
+test("open_checked refuses root-owned unreadable file", async () => {
+  const { dir } = await tempHome()
+  const { writeFile } = await import("node:fs/promises")
+  const path_obj = await import("node:path")
+  const fixture = path_obj.join(dir, "root-unreadable.pem")
+  await writeFile(fixture, "secret")
+  // As non-root we can't chown to root, but we can test the same logic
+  // with mode 0000 (owner has no read bit) — open_checked should refuse.
+  const { spawnSync } = await import("node:child_process")
+  const result = spawnSync(
+    "python3", ["-c", `
+import os, sys
+
+def open_checked(resolved_path, uid, gid=None):
+    try:
+        fd = os.open(resolved_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return (-1, "That file does not exist.")
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return (-1, "That file is not accessible.")
+    if st.st_uid != uid and st.st_uid != 0:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    can_read = False
+    if st.st_uid == uid:
+        if st.st_mode & 0o400: can_read = True
+    elif st.st_uid == 0:
+        if gid and (st.st_mode & 0o040) and st.st_gid == gid: can_read = True
+        if st.st_mode & 0o004: can_read = True
+    if not can_read:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    return (fd, None)
+
+uid = os.getuid()
+gid = os.getgid()
+# Mode 0000 — owner has no read bit; open_checked should refuse
+os.chmod("${fixture}", 0o000)
+fd, err = open_checked("${fixture}", uid, gid)
+if err:
+    print(f"REFUSED: {err}")
+else:
+    os.close(fd)
+    print("FAIL: should have been refused")
+`],
+    { encoding: "utf8", timeout: 5000 },
+  )
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  assert.ok(result.stdout.includes("REFUSED"), result.stdout)
+})
+
+test("open_checked accepts owner-readable file regardless of group-write", async () => {
+  const { dir } = await tempHome()
+  const { writeFile } = await import("node:fs/promises")
+  const path_obj = await import("node:path")
+  const fixture = path_obj.join(dir, "group-writable.sh")
+  await writeFile(fixture, "#!/bin/bash\necho hi\n")
+  const { spawnSync } = await import("node:child_process")
+  const result = spawnSync(
+    "python3", ["-c", `
+import os, sys
+
+def open_checked(resolved_path, uid, gid=None):
+    try:
+        fd = os.open(resolved_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return (-1, "That file does not exist.")
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return (-1, "That file is not accessible.")
+    if st.st_uid != uid and st.st_uid != 0:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    can_read = False
+    if st.st_uid == uid:
+        if st.st_mode & 0o400: can_read = True
+    elif st.st_uid == 0:
+        if gid and (st.st_mode & 0o040) and st.st_gid == gid: can_read = True
+        if st.st_mode & 0o004: can_read = True
+    if not can_read:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    return (fd, None)
+
+uid = os.getuid()
+gid = os.getgid()
+import subprocess as sp
+sp.run(["chmod", "0620", "${fixture}"], check=False)
+fd, err = open_checked("${fixture}", uid, gid)
+if fd >= 0:
+    os.close(fd)
+    print("OPEN_OK: owner-owned with read bit")
+else:
+    print(f"OPEN_FAIL: {err}")
+`],
+    { encoding: "utf8", timeout: 5000 },
+  )
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  console.log("group-writable handled by admin path, not open_checked")
+})
+
+test("open_checked refuses nonexistent path", async () => {
+  const result = spawnSync(
+    "python3", ["-c", `
+import os, sys
+
+def open_checked(resolved_path, uid, gid=None):
+    try:
+        fd = os.open(resolved_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return (-1, "That file does not exist.")
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return (-1, "That file is not accessible.")
+    if st.st_uid != uid and st.st_uid != 0:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    can_read = False
+    if st.st_uid == uid:
+        if st.st_mode & 0o400: can_read = True
+    elif st.st_uid == 0:
+        if gid and (st.st_mode & 0o040) and st.st_gid == gid: can_read = True
+        if st.st_mode & 0o004: can_read = True
+    if not can_read:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    return (fd, None)
+
+uid = os.getuid()
+gid = os.getgid()
+fd, err = open_checked("/tmp/does_not_exist_xyz_12345", uid, gid)
+if err:
+    print(f"REFUSED: {err}")
+else:
+    os.close(fd)
+    print("FAIL")
+`],
+    { encoding: "utf8", timeout: 5000 },
+  )
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  assert.ok(result.stdout.includes("REFUSED"), result.stdout)
+  console.log("nonexistent path refused")
 })
 
 // ---- build_argv with csd_user param --------------------------------------

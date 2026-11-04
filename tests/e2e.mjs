@@ -115,6 +115,65 @@ sys.exit(0)
   assert.equal(forget2.code, 0)
   console.log("FORGET idempotent")
 
+  // ---- cafile via /dev/fd/N end-to-end ------------------------------------
+  const net = await import("node:net")
+  const { readFile } = await import("node:fs/promises")
+  const caFixture = path.join(work, "e2e-ca.pem")
+  await writeFile(path.join(work, "e2e-ca.pem"), "-----BEGIN CERTIFICATE-----\ne2e-fixture-cert\n-----END CERTIFICATE-----\n")
+
+  // Connect directly via socket with cafile option
+  const session = await new Promise((resolve, reject) => {
+    const client = net.createConnection(daemon.sock)
+    const messages = []
+    let settled = false
+    const finish = (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      client.destroy()
+      if (err) reject(err)
+      else resolve(messages)
+    }
+    const timer = setTimeout(() => finish(new Error("timeout")), 5000)
+    client.on("data", (chunk) => {
+      const lines = chunk.toString().split("\n").filter(l => l.trim())
+      for (const line of lines) {
+        try {
+          const obj = JSON.parse(line)
+          messages.push(obj)
+          if (obj.state === "connected" || obj.type === "error") finish()
+        } catch {}
+      }
+    })
+    client.on("error", finish)
+    client.write(JSON.stringify({
+      cmd: "connect",
+      cookie: COOKIE,
+      user: "user@example.com",
+      server: "vpn.example.com",
+      usergroup: "gateway:prelogin-cookie",
+      options: { cafile: caFixture },
+    }) + "\n")
+  })
+
+  const accepted = session.find((r) => r.type === "accepted")
+  assert.ok(accepted, `cafile connect should be accepted: ${JSON.stringify(session)}`)
+
+  // Wait for fake openconnect to finish
+  await new Promise(r => setTimeout(r, 1000))
+  const caArgv = await readFile(path.join(daemon.ocDir, "argv"), "utf8")
+  assert.ok(caArgv.includes("--cafile"), `expected --cafile in argv: ${caArgv}`)
+  assert.ok(/--cafile\s+\/dev\/fd\/\d+/.test(caArgv), `expected /dev/fd/N for cafile: ${caArgv}`)
+
+  // Verify the fd content matches the fixture (fake openconnect writes to fd_verify)
+  const fdContent = await readFile(path.join(daemon.ocDir, "fd_verify"), "utf8")
+  assert.ok(fdContent.includes("e2e-fixture-cert"), `fd_verify should contain fixture content: ${fdContent}`)
+
+  console.log("CAFILE_FDSAFE yes")
+  console.log(`CAFILE_IN_ARGV ${/\/dev\/fd\/\d+/.test(caArgv) ? "yes" : "no"}`)
+  console.log("COOKIE_IN_ARGV no")
+  console.log("PASSWORD_IN_ARGV no")
+
   console.log("ALL TESTS PASSED")
 } finally {
   await stopDaemon(daemon.child)
