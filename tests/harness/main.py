@@ -102,6 +102,20 @@ def read_prop(obj, name, default=None):
     return default if value is None else value
 
 
+def _confirm_above_bar(plugin):
+    """Round 4: the armed remove-confirm row must sit fully above the pinned
+    Save/Back bar. Returns None when the confirm is not shown."""
+    confirm = find_anywhere(plugin, "removeConfirm")
+    footer = find_anywhere(plugin, "editorFooter")
+    if confirm is None or footer is None:
+        return None
+    if confirm.property("visible") is not True:
+        return None
+    confirm_bottom = confirm.mapRectToScene(confirm.boundingRect()).bottom()
+    footer_top = footer.mapRectToScene(footer.boundingRect()).top()
+    return confirm_bottom <= footer_top
+
+
 def find_text_overlaps(plugin):
     """Fail condition from the r3 review: two visible text items whose
     rectangles intersect without one containing the other."""
@@ -193,6 +207,7 @@ def snapshot(plugin, store):
         "activeProfile": read_prop(plugin, "activeProfile", ""),
         "screen": read_prop(store, "screen", "") if store is not None else "",
         "overlaps": find_text_overlaps(plugin) if plugin is not None else [],
+        "confirmAboveBar": _confirm_above_bar(plugin),
         "heroStates": [w.objectName() for w in plugin.findChildren(QObject, "heroState")] if plugin is not None else [],
         "dupCounts": {
             n: len(plugin.findChildren(QObject, n))

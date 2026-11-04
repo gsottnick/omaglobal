@@ -56,10 +56,13 @@ Column {
     // One shield glyph (the font has exactly one); state is carried by
     // color and weight of the dimming instead of a separate outline cut.
     readonly property string iconGlyph: "\u{f132}"
-    readonly property color iconColor: connected ? Color.accent
-      : (failed ? Color.urgent : Color.foreground)
+    // "Connected/ok" is the shell's bar-active color, not the accent (the
+    // accent is red in some themes, which reads as an error).
+    readonly property color okColor: Color.bar.active
+    readonly property color iconColor: connected ? okColor
+      : (failed ? Color.urgent : (connecting ? Color.accent : Color.foreground))
     readonly property real iconOpacity: connected ? 1.0
-      : (failed ? 0.9 : 0.55)
+      : (failed ? 0.9 : 0.4)
 
     Item {
       id: visual
@@ -135,7 +138,8 @@ Column {
       width: parent.width
       horizontalAlignment: Text.AlignHCenter
       textFormat: Text.PlainText
-      color: hero.connected ? Color.accent : (hero.failed ? Color.urgent : Color.foreground)
+      color: hero.iconColor
+      opacity: hero.connected || hero.failed || hero.connecting ? 1 : 0.4
       font.family: Style.font.family
       font.pixelSize: Style.font.body
       text: hero.stateWord
@@ -341,8 +345,8 @@ Column {
 
   onRemoveArmedChanged: {
     if (removeArmed) {
-      // Bring the confirm row above the pinned footer into view.
-      editorScrollTo = 999999
+      // Scroll once the layout knows the confirm row's height.
+      Qt.callLater(function () { editorScrollTo = 999999 })
     }
   }
 
@@ -698,26 +702,48 @@ Column {
         font.pixelSize: Style.font.body
         text: "Gateway  " + OmaStore.gateway
       }
-      Text {
+      Row {
         objectName: "vpnExpires"
         width: parent.width
-        elide: Text.ElideRight
-        textFormat: Text.PlainText
-        color: Color.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
-        text: "Expires  " + OmaStore.expiresText()
+        spacing: Style.space(6)
+        Text {
+          text: "Expires"
+          textFormat: Text.PlainText
+          color: Color.foreground
+          opacity: 0.6
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+        }
+        Text {
+          text: OmaStore.expiresText()
+          elide: Text.ElideRight
+          textFormat: Text.PlainText
+          color: Color.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+        }
       }
-      Text {
+      Row {
         objectName: "vpnTraffic"
         visible: OmaStore.iface !== ""
         width: parent.width
-        elide: Text.ElideRight
-        textFormat: Text.PlainText
-        color: Color.muted
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
-        text: "Data  " + OmaStore.humanBytes(OmaStore.rxBytes) + " down  " + OmaStore.humanBytes(OmaStore.txBytes) + " up"
+        spacing: Style.space(6)
+        Text {
+          text: "Data"
+          textFormat: Text.PlainText
+          color: Color.foreground
+          opacity: 0.6
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+        }
+        Text {
+          text: OmaStore.humanBytes(OmaStore.rxBytes) + " down  " + OmaStore.humanBytes(OmaStore.txBytes) + " up"
+          elide: Text.ElideRight
+          textFormat: Text.PlainText
+          color: Color.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+        }
       }
     }
 
@@ -744,12 +770,6 @@ Column {
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       text: OmaStore.message
-    }
-
-    HintCaption {
-      objectName: "errorAdvice"
-      visible: OmaStore.phase === "failed" && !root.askPassword && OmaStore.message !== ""
-      text: "Once the problem is fixed, press the button below to try again."
     }
 
     Button {
@@ -882,7 +902,7 @@ Column {
         id: editorBody
         width: parent.width - Style.space(10)
         spacing: Style.space(8)
-        bottomPadding: Style.space(14)
+        bottomPadding: Style.space(56)
 
         Column {
           id: editorTop
@@ -1215,6 +1235,7 @@ Column {
     // Pinned actions: always visible regardless of scroll position.
     Row {
       id: editorFooter
+      objectName: "editorFooter"
       anchors.bottom: parent.bottom
       width: parent.width
       spacing: Style.space(6)

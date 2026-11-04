@@ -120,6 +120,12 @@ def run_main(shell: Path, settings: dict, steps: str, socket_path: str, plugin: 
     return subprocess.run(command, env=env, text=True, capture_output=True, check=False)
 
 
+def require_confirm_above_bar(rows: list[dict], where: str) -> None:
+    for index, row in enumerate(rows):
+        if row.get("confirmAboveBar") is False:
+            raise SystemExit(f"remove-confirm clipped under the pinned bar in {where} snapshot {index}")
+
+
 def require_no_overlaps(rows: list[dict], where: str) -> None:
     """The r3 review requires failing when sibling text rectangles intersect."""
     for index, row in enumerate(rows):
@@ -195,6 +201,7 @@ def scenario_states(shell: Path) -> None:
             raise SystemExit(f"states load failed\n{proc.stderr}\n{proc.stdout}")
         rows = snaps(proc)
         require_no_overlaps(rows, "scenario")
+        require_confirm_above_bar(rows, "scenario")
         if len(rows) != 13:
             raise SystemExit(f"expected 13 snapshots, got {len(rows)}")
         expect = [
@@ -255,7 +262,9 @@ def scenario_connect(shell: Path, plugin: Path | None = None) -> None:
             raise SystemExit(f"connect load failed\n{proc.stderr}\n{proc.stdout}")
         rows = snaps(proc)
         require_no_overlaps(rows, "scenario")
+        require_confirm_above_bar(rows, "scenario")
         require_no_overlaps(rows, "scenario")
+        require_confirm_above_bar(rows, "scenario")
         if len(rows) < 4:
             raise SystemExit(f"connect snapshots missing {len(rows)}")
         opened = rows[1]
