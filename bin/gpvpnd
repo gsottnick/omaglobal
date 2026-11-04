@@ -29,6 +29,22 @@ _GATEWAY_LINE = re.compile(r"^\s*(.+?)\s+\(([^)]+)\)\s+\[priority\s+(\d+)\]\s*$"
 _GATEWAY_NAME = re.compile(r"^Gateway:\s*(.+?)\s*$")
 _CONNECTED = re.compile(r"Connected as\s+([0-9A-Fa-f:.]+)")
 _EXPIRES = re.compile(r"(?:will expire at|expires)\s+(\S+)")
+_SERVERCERT_RE = re.compile(r"^[0-9A-Fa-f]{40}$")
+
+OS_VALUES = frozenset({
+    "win", "win7", "win8", "win8-1", "win10",
+    "mac", "mac-intel", "linux", "linux-64",
+    "android", "freebsd", "openbsd", "solaris",
+})
+
+FILE_KEYS = {"csdWrapper", "cafile", "certificate", "sslkey", "vpncScript"}
+FILE_FLAGS = {
+    "csdWrapper": "--csd-wrapper",
+    "cafile": "--cafile",
+    "certificate": "--certificate",
+    "sslkey": "--sslkey",
+    "vpncScript": "--script",
+}
 
 BUSY = {"auth", "connecting", "connected"}
 
@@ -37,29 +53,146 @@ def redact(text: str) -> str:
     return _COOKIE_SHAPED.sub("[redacted]", text or "")
 
 
-def openconnect_argv(binary: str, user: str, usergroup: str, server: str) -> list[str]:
-    """The only argv the daemon will ever exec. No cookie, no shell string."""
-    return [
-        binary,
-        "--protocol=gp",
-        "--useragent",
-        "PAN GlobalProtect",
-        "--user",
-        user,
-        "--os",
-        "linux-64",
-        "--usergroup",
-        usergroup,
-        "--passwd-on-stdin",
-        "--non-inter",
-        server,
-    ]
-
-
-def _plain_token(value: str) -> bool:
+def _plain_token(value: str, max_len: int = 512) -> bool:
     if not value or value.startswith("-"):
         return False
-    return "\n" not in value and "\x00" not in value and len(value) <= 512
+    return "\n" not in value and "\x00" not in value and len(value) <= max_len
+
+
+def build_argv(
+    binary: str,
+    user: str,
+    usergroup: str,
+    server: str,
+    options: dict | None = None,
+    password_mode: bool = False,
+) -> tuple[list[str], str | None]:
+    """Build the openconnect argv from a whitelist of options.
+
+    Returns (argv, error_message).  error_message is non-None when an option
+    fails validation; in that case argv is the partial list built so far.
+    """
+    if not _plain_token(user) or not _plain_token(server):
+        return [], "Refusing an unsafe connect field"
+
+    # Validate options first so we can honour an ``os`` override and avoid
+    # emitting the default ``--os linux-64`` alongside a user-supplied one.
+    err = _validate_options(options, password_mode, usergroup)
+    if err:
+        return [], err
+
+    os_value = options.get("os") if options else None  # type: ignore[union-attr]
+    if not os_value:
+        os_value = "linux-64"
+
+    args = [binary, "--protocol=gp", "--user", user]
+
+    if not password_mode:
+        # Cookie mode: always include --usergroup
+        if not _plain_token(usergroup):
+            return [], "Refusing an unsafe connect field"
+        if not usergroup or _COOKIE_SHAPED.search(usergroup):
+            return [], "Refusing an unsafe connect field"
+        args.extend([
+            "--passwd-on-stdin", "--non-inter",
+            "--useragent", "PAN GlobalProtect", "--os", os_value,
+            "--usergroup", usergroup,
+        ])
+    else:
+        # Password mode: only include --usergroup when explicitly provided and valid
+        if usergroup and _plain_token(usergroup):
+            args.extend([
+                "--passwd-on-stdin", "--non-inter",
+                "--useragent", "PAN GlobalProtect", "--os", os_value,
+                "--usergroup", usergroup,
+            ])
+        else:
+            args.extend([
+                "--passwd-on-stdin", "--non-inter",
+                "--useragent", "PAN GlobalProtect", "--os", os_value,
+            ])
+
+    # Append validated option flags (all before the positional server arg)
+    if options:
+        for key, value in options.items():
+            if key == "os":
+                continue  # already set as os_value above
+            if key == "useragent":
+                args.extend(["--useragent", value])
+            elif key in FILE_KEYS:
+                args.extend([FILE_FLAGS[key], value])
+            elif key == "servercert":
+                args.append(f"--servercert={value}")
+            elif key == "baseMtu":
+                args.append(f"--base-mtu={int(value)}")
+            elif key == "noDtls" and value is True:
+                args.append("--no-dtls")
+            elif key == "reconnectTimeout":
+                args.append(f"--reconnect-timeout={int(value)}")
+
+    args.append(server)
+    return args, None
+
+
+def _validate_options(
+    options: dict | None,
+    password_mode: bool,
+    usergroup: str,
+) -> str | None:
+    """Validate whitelist options against the connect request.
+
+    Returns an error string on failure; ``None`` on success.
+    Side effects: none — ``build_argv`` inserts validated values into argv.
+    """
+    if not options:
+        return None
+
+    for key, value in options.items():
+        if key == "os":
+            if value not in OS_VALUES:
+                return f"Invalid os value: {value}"
+
+        elif key == "useragent":
+            if not _plain_token(value, 256):
+                return f"Invalid useragent value"
+
+        elif key in FILE_KEYS:
+            flag = FILE_FLAGS[key]
+            if not isinstance(value, str) or not value or not _plain_token(value):
+                return f"Invalid {key} value"
+            if not os.path.isabs(value):
+                return f"{key} must be an absolute path"
+            if not os.path.isfile(value):
+                return f"{key} file does not exist"
+
+        elif key == "servercert":
+            if not isinstance(value, str) or not _SERVERCERT_RE.match(value):
+                return f"Invalid servercert value"
+
+        elif key == "baseMtu":
+            try:
+                v = int(value)
+            except (ValueError, TypeError):
+                return f"Invalid baseMtu value"
+            if v < 576 or v > 65535:
+                return f"baseMtu out of range"
+
+        elif key == "noDtls":
+            if value is True:
+                pass  # handled by build_argv
+
+        elif key == "reconnectTimeout":
+            try:
+                v = int(value)
+            except (ValueError, TypeError):
+                return f"Invalid reconnectTimeout value"
+            if v < 10 or v > 86400:
+                return f"reconnectTimeout out of range"
+
+        else:
+            return f"Unknown option: {key}"
+
+    return None
 
 
 class Daemon:
@@ -84,6 +217,11 @@ class Daemon:
         self.gateways: list[dict[str, object]] = []
         self.manual_gateway = ""
         self.last_line = ""
+        # Traffic stats
+        self.rx_bytes = 0
+        self.tx_bytes = 0
+        self.iface = ""
+        self._stats_thread: threading.Thread | None = None
         self._load_state()
 
     def public(self) -> dict[str, object]:
@@ -97,7 +235,84 @@ class Daemon:
             "message": self.message,
             "server": self.server_host,
             "gateways": self.gateways,
+            "rxBytes": self.rx_bytes,
+            "txBytes": self.tx_bytes,
+            "iface": self.iface,
         }
+
+    @staticmethod
+    def netdev_stats(base: str, iface: str) -> tuple[int, int] | None:
+        """Read rx/tx bytes for *iface* under *base*.
+
+        Returns (rx_bytes, tx_bytes) or None when the interface data is
+        unavailable.
+        """
+        try:
+            rx_path = os.path.join(base, iface, "statistics", "rx_bytes")
+            tx_path = os.path.join(base, iface, "statistics", "tx_bytes")
+            with open(rx_path, encoding="utf-8") as fh:
+                rx = int(fh.read().strip())
+            with open(tx_path, encoding="utf-8") as fh:
+                tx = int(fh.read().strip())
+            return rx, tx
+        except (OSError, ValueError):
+            return None
+
+    # ---- traffic stats --------------------------------------------------
+
+    def _start_traffic_stats(self) -> None:
+        with self.lock:
+            initial = set()
+            try:
+                initial = set(os.listdir("/sys/class/net"))
+            except OSError:
+                pass
+            self._stats_thread = threading.Thread(
+                target=self._traffic_loop, args=(initial,), daemon=True
+            )
+            self._stats_thread.start()
+
+    def _traffic_loop(self, initial: set[str]) -> None:
+        while True:
+            time.sleep(5)
+            try:
+                current = set(os.listdir("/sys/class/net"))
+            except OSError:
+                continue
+            new = {n for n in current if n not in initial}
+            if not new:
+                continue
+            # Prefer interfaces starting with "tun" or "gp"
+            preferred = [n for n in new if n.startswith("tun") or n.startswith("gp")]
+            iface = preferred[0] if preferred else sorted(new)[0]
+            base = "/sys/class/net"
+            while True:
+                result = self.netdev_stats(base, iface)
+                if result is not None:
+                    rx, tx = result
+                    with self.lock:
+                        if self.state not in BUSY:
+                            return
+                        if self.rx_bytes != rx or self.tx_bytes != tx or self.iface != iface:
+                            self.rx_bytes = rx
+                            self.tx_bytes = tx
+                            self.iface = iface
+                            snap = dict(self.public())
+                    self._broadcast({"type": "state", **snap})
+                time.sleep(5)
+
+    def _stop_traffic_stats(self) -> None:
+        self._clear_traffic_stats()
+        if self._stats_thread is not None:
+            self._stats_thread.join(timeout=2)
+            self._stats_thread = None
+
+    def _clear_traffic_stats(self) -> None:
+        self.rx_bytes = 0
+        self.tx_bytes = 0
+        self.iface = ""
+
+    # ---------------------------------------------------------------------
 
     def _load_state(self) -> None:
         if not self.state_file or not os.path.isfile(self.state_file):
@@ -156,6 +371,7 @@ class Daemon:
                 self.ip = ""
                 self.expires = ""
                 self.server_host = ""
+                self._clear_traffic_stats()
             self.state = state
             if state == "connected":
                 self.since = int(time.time())
@@ -192,15 +408,38 @@ class Daemon:
         cookie = str(request.get("cookie") or "")
         user = str(request.get("user") or "")
         server = str(request.get("server") or "")
-        usergroup = str(request.get("usergroup") or "gateway:prelogin-cookie")
+        password = str(request.get("password") or "")
+        usergroup = str(request.get("usergroup") or "")
         gateway = str(request.get("gateway") or "")
-        with self.lock:
-            if self.state in BUSY:
-                return {"type": "error", "message": "Already connecting or connected"}
-            if not _plain_token(server) or not _plain_token(user) or not _plain_token(usergroup):
+        options = request.get("options")
+        if not isinstance(options, dict):
+            options = None
+
+        password_mode = bool(password) and _plain_token(password)
+
+        # Validate non-password fields
+        if not _plain_token(server) or not _plain_token(user):
+            return {"type": "error", "message": "Refusing an unsafe connect field"}
+        if password_mode:
+            if usergroup and not _plain_token(usergroup):
+                return {"type": "error", "message": "Refusing an unsafe connect field"}
+        else:
+            if not _plain_token(usergroup):
                 return {"type": "error", "message": "Refusing an unsafe connect field"}
             if not cookie or _COOKIE_SHAPED.search(usergroup):
                 return {"type": "error", "message": "Refusing an unsafe connect field"}
+
+        # Validate options against whitelist
+        args, err = build_argv(
+            self.openconnect, user, usergroup, server,
+            options=options, password_mode=password_mode,
+        )
+        if err:
+            return {"type": "error", "message": err}
+
+        with self.lock:
+            if self.state in BUSY:
+                return {"type": "error", "message": "Already connecting or connected"}
             self.want_disconnect = False
             self.user = user
             self.server_host = server
@@ -218,7 +457,7 @@ class Daemon:
         self._broadcast({"type": "state", **snap})
         threading.Thread(
             target=self._run_tunnel,
-            args=(cookie, user, server, usergroup),
+            args=(args, password, cookie),
             daemon=True,
         ).start()
         return {"type": "accepted", **snap}
@@ -234,12 +473,12 @@ class Daemon:
             self.server_host = ""
             snap = dict(self.public())
         self._kill(proc)
+        self._stop_traffic_stats()
         self._save_state()
         self._broadcast({"type": "state", **snap})
         return {"type": "accepted", **snap}
 
-    def _run_tunnel(self, cookie: str, user: str, server: str, usergroup: str) -> None:
-        argv = openconnect_argv(self.openconnect, user, usergroup, server)
+    def _run_tunnel(self, argv: list[str], password: str, cookie: str) -> None:
         try:
             proc = subprocess.Popen(
                 argv,
@@ -261,16 +500,20 @@ class Daemon:
                 intentional = False
         try:
             if proc.stdin is not None:
-                proc.stdin.write(cookie + "\n")
+                if password:
+                    proc.stdin.write(password + "\n")
+                else:
+                    proc.stdin.write(cookie + "\n")
                 proc.stdin.close()
         except OSError:
             pass
-        # The cookie leaves scope here. It is not stored on the daemon.
-        del cookie
+        # The cookie/password leaves scope here. They are not stored on the daemon.
+        del cookie, password
         if intentional:
             self._kill(proc)
         else:
             self._enter("connecting")
+            self._start_traffic_stats()
         assert proc.stdout is not None
         for line in proc.stdout:
             self._on_output(line.rstrip("\n"))

@@ -27,6 +27,13 @@ WEBKIT_HINT = "The login window needs webkit2gtk-4.1. Press Install in the bar, 
 CONNECT_WAIT = 90
 _COOKIE_SHAPED = re.compile(r"[A-Za-z0-9+/=]{40,}")
 
+_WHITELIST_KEYS = {
+    "os", "useragent", "csdWrapper",
+    "servercert", "cafile", "certificate", "sslkey", "baseMtu",
+    "noDtls", "reconnectTimeout", "vpncScript",
+}
+_PROFILE_OPTIONAL_KEYS = {"authMethod", "interface"}
+_ALL_OPTIONAL_KEYS = _WHITELIST_KEYS | _PROFILE_OPTIONAL_KEYS
 
 
 def redact(text: str) -> str:
@@ -57,10 +64,26 @@ def cookie_jar(profile_name: str) -> str:
     return os.path.join(base, "gp-vpn", f"okta-{digest}.json")
 
 
+def _is_set(value: object) -> bool:
+    """True when *value* is a non-empty string or a real bool/int."""
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, int):
+        return True
+    if isinstance(value, str):
+        return bool(value.strip())
+    return False
+
+
 def normalize(entry: dict[str, object]) -> dict[str, object]:
-    """Fill gaps and force gateway mode. A manual gateway is kept as given."""
+    """Fill gaps and force gateway mode. A manual gateway is kept as given.
+
+    Optional fields are carried through only when they are set (non-empty
+    strings, booleans, integers).  Empty/missing optional fields are not
+    stored as empty strings.
+    """
     gateways = entry.get("gateways")
-    profile = {
+    profile: dict[str, object] = {
         "name": str(entry.get("name") or "Default").strip() or "Default",
         "portal": str(entry.get("portal") or EXAMPLE_PORTAL),
         "gateway": str(entry.get("gateway") or ""),
@@ -68,6 +91,10 @@ def normalize(entry: dict[str, object]) -> dict[str, object]:
         "username": str(entry.get("username") or EXAMPLE_USER),
         "mode": "gateway",
     }
+    # Carry through optional fields that are actually set
+    for key in _ALL_OPTIONAL_KEYS:
+        if key in entry and _is_set(entry[key]):
+            profile[key] = entry[key]
     if isinstance(gateways, list):
         profile["gateways"] = gateways
     return profile
@@ -226,19 +253,22 @@ def transact(payload: dict[str, object], terminal: bool, timeout: float = 12) ->
         client.close()
 
 
-def saml_env_and_argv(portal: str, jar: str) -> tuple[dict[str, str], list[str]]:
-    """Both WebKit variables, no -S/-P/-E/-x, cookie jar via -C."""
+def saml_env_and_argv(portal: str, jar: str, interface: str = "gateway") -> tuple[dict[str, str], list[str]]:
+    """Both WebKit variables, no -S/-P/-E/-x, cookie jar via -C.
+
+    interface picks the sign-in endpoint: "gateway" (-g) or "portal" (-p)."""
     env = os.environ.copy()
     env["GDK_BACKEND"] = "x11"
     env["WEBKIT_DISABLE_DMABUF_RENDERER"] = "1"
-    argv = ["python3", saml_script(), "-g", "--clientos", "Linux", "-C", jar, portal]
+    endpoint = "-p" if interface == "portal" else "-g"
+    argv = ["python3", saml_script(), endpoint, "--clientos", "Linux", "-C", jar, portal]
     forbidden = {"-S", "-P", "-E", "-x", "--exec"}
     if forbidden.intersection(argv):
         raise RuntimeError("refusing to spawn the login helper with an exec flag")
     return env, argv
 
 
-def run_saml(portal: str, jar: str) -> tuple[int, str]:
+def run_saml(portal: str, jar: str, interface: str = "gateway") -> tuple[int, str]:
     script = saml_script()
     if not os.path.isfile(script):
         print("Login helper is not installed. Press Install in the bar, or run tools/setup.sh once in a terminal.", file=sys.stderr)
@@ -248,7 +278,7 @@ def run_saml(portal: str, jar: str) -> tuple[int, str]:
     # The directory is the boundary. The login tool creates the jar itself,
     # sometimes world-readable, and the jar is a reusable session secret.
     tighten(jar_dir, 0o700)
-    env, argv = saml_env_and_argv(portal, jar)
+    env, argv = saml_env_and_argv(portal, jar, interface)
     try:
         completed = subprocess.run(argv, env=env, capture_output=True, text=True, check=False)
     except OSError:
@@ -257,6 +287,15 @@ def run_saml(portal: str, jar: str) -> tuple[int, str]:
     if os.path.isfile(jar):
         tighten(jar, 0o600)
     return completed.returncode, completed.stdout + "\n" + completed.stderr
+
+
+def _build_options(profile: dict[str, object]) -> dict[str, object]:
+    """Extract whitelisted option fields from a profile."""
+    options: dict[str, object] = {}
+    for key in _WHITELIST_KEYS:
+        if key in profile and _is_set(profile[key]):
+            options[key] = profile[key]
+    return options
 
 
 def connect_payload(profile: dict[str, object], parsed: dict[str, str], usergroup: str) -> dict[str, object]:
@@ -271,6 +310,28 @@ def connect_payload(profile: dict[str, object], parsed: dict[str, str], usergrou
         "usergroup": usergroup,
         "gateway": gateway,
     }
+
+
+def password_connect_payload(profile: dict[str, object], password: str) -> dict[str, object]:
+    """Build a password-mode connect payload (no cookie, no SAML result)."""
+    server = str(profile.get("gateway") or "") or str(profile.get("portal") or "")
+    gateway = str(profile.get("gatewayName") or "") or str(profile.get("gateway") or "")
+    user = str(profile.get("username") or EXAMPLE_USER)
+    payload: dict[str, object] = {
+        "cmd": "connect",
+        "user": user,
+        "server": server,
+        "password": password,
+        "gateway": gateway,
+    }
+    # Add usergroup only when explicitly set in the profile
+    ug = profile.get("usergroup")
+    if _is_set(ug):
+        payload["usergroup"] = str(ug)
+    options = _build_options(profile)
+    if options:
+        payload["options"] = options
+    return payload
 
 
 def report(message: dict[str, object] | None, code: int) -> int:
@@ -294,7 +355,32 @@ def cmd_connect(profile_name: str, debug: bool) -> int:
     if profile is None:
         print("No such profile. Add one with: gpvpn profile add", file=sys.stderr)
         return 2
-    code, text = run_saml(str(profile["portal"]), cookie_jar(str(profile["name"])))
+
+    # Password mode: skip SAML entirely, read password from stdin
+    auth_method = str(profile.get("authMethod") or "sso")
+    if auth_method == "password":
+        raw_password = sys.stdin.readline()
+        if not raw_password:
+            print("No password was provided.", file=sys.stderr)
+            return 1
+        password = raw_password.rstrip("\n")
+        if not password:
+            print("No password was provided.", file=sys.stderr)
+            return 1
+        payload = password_connect_payload(profile, password)
+        status, message = transact(payload, terminal=True, timeout=connect_wait())
+        if status == 4:
+            return 4
+        if message and message.get("type") == "error":
+            return report(message, 5)
+        if message and message.get("state") == "connected":
+            store["active"] = profile["name"]
+            save_profiles(store)
+            return report(message, 0)
+        return report(message or {}, 5)
+
+    # SSO mode — unchanged flow
+    code, text = run_saml(str(profile["portal"]), cookie_jar(str(profile["name"])), str(profile.get("interface") or "gateway"))
     if debug:
         sys.stderr.write(redact(text))
     parsed = parse_saml(text)
@@ -308,6 +394,9 @@ def cmd_connect(profile_name: str, debug: bool) -> int:
         print("Could not read the login response", file=sys.stderr)
         return 3
     first = connect_payload(profile, parsed, parsed["usergroup"])
+    options = _build_options(profile)
+    if options:
+        first["options"] = options
     status, message = transact(first, terminal=True, timeout=connect_wait())
     if status == 4:
         return 4
@@ -327,7 +416,10 @@ def cmd_connect(profile_name: str, debug: bool) -> int:
     alternate = other_interface(parsed["usergroup"])
     if alternate == parsed["usergroup"]:
         return report(message, 5)
-    status, second = transact(connect_payload(profile, parsed, alternate), terminal=True, timeout=connect_wait())
+    second_payload = connect_payload(profile, parsed, alternate)
+    if options:
+        second_payload["options"] = options
+    status, second = transact(second_payload, terminal=True, timeout=connect_wait())
     if status == 4:
         return 4
     if second and second.get("state") == "connected":
@@ -517,6 +609,39 @@ def cmd_profile_set(name: str, key: str, value: str) -> int:
         profile[key] = value
     elif key == "mode":
         profile["mode"] = "gateway"
+    elif key == "authMethod":
+        if value not in ("sso", "password"):
+            print(f"Invalid authMethod value: {value}", file=sys.stderr)
+            return 2
+        profile[key] = value
+    elif key == "interface":
+        if value not in ("gateway", "portal"):
+            print(f"Invalid interface value: {value}", file=sys.stderr)
+            return 2
+        profile[key] = value
+    elif key in _WHITELIST_KEYS and key not in {"noDtls", "baseMtu", "reconnectTimeout"}:
+        profile[key] = value
+    elif key == "noDtls":
+        lo = value.lower()
+        if lo in ("on", "true"):
+            profile[key] = True
+        elif lo in ("off", "false"):
+            profile[key] = False
+        else:
+            print(f"Invalid noDtls value: {value}", file=sys.stderr)
+            return 2
+    elif key == "baseMtu":
+        try:
+            profile[key] = int(value)
+        except ValueError:
+            print(f"Invalid baseMtu value: {value}", file=sys.stderr)
+            return 2
+    elif key == "reconnectTimeout":
+        try:
+            profile[key] = int(value)
+        except ValueError:
+            print(f"Invalid reconnectTimeout value: {value}", file=sys.stderr)
+            return 2
     else:
         print("Unknown profile field", file=sys.stderr)
         return 2
@@ -528,6 +653,14 @@ def cmd_profile_set(name: str, key: str, value: str) -> int:
         profile["gatewayName"] = value
     save_profiles(store)
     print(json.dumps(store))
+    return 0
+
+
+def cmd_forget(name: str) -> int:
+    path = cookie_jar(name)
+    if os.path.isfile(path):
+        os.unlink(path)
+    print(json.dumps({"forgot": name}))
     return 0
 
 
@@ -580,6 +713,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("deps")
     sub.add_parser("notify")
 
+    forget = sub.add_parser("forget")
+    forget.add_argument("name")
+
     profile = sub.add_parser("profile")
     profile_sub = profile.add_subparsers(dest="profile_cmd", required=True)
     profile_sub.add_parser("list")
@@ -612,6 +748,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_deps()
     if args.cmd == "notify":
         return cmd_notify()
+    if args.cmd == "forget":
+        return cmd_forget(args.name)
     if args.cmd == "profile" and args.profile_cmd == "list":
         return cmd_profile_list()
     if args.cmd == "profile" and args.profile_cmd == "add":

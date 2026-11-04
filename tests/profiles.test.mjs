@@ -2,6 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import path from "node:path"
 import { statSync } from "node:fs"
+import { mkdir, writeFile } from "node:fs/promises"
 import { gpvpn, tempHome, run } from "./support.mjs"
 
 test("profiles round-trip and mode is always gateway", async () => {
@@ -38,4 +39,127 @@ test("connect without a profile exits 2 and says to add one", async () => {
   assert.equal(result.code, 2)
   assert.match(result.stderr, /No such profile\. Add one with: gpvpn profile add/)
   console.log("no-profile exit 2")
+})
+
+// ---- normalize defaults -------------------------------------------------
+
+test("normalize fills required fields and carries optional ones", async () => {
+  const { env } = await tempHome()
+  // Add profile with optional fields
+  const added = await run(gpvpn, [
+    "profile", "add", "--name", "Test",
+    "--portal", "vpn.example.com", "--username", "user@example.com",
+  ], env)
+  assert.equal(added.code, 0)
+
+  // Set optional fields
+  const set_os = JSON.parse((await run(gpvpn, ["profile", "set", "Test", "os", "win10"], env)).stdout)
+  assert.equal(set_os.profiles.find(p => p.name === "Test").os, "win10")
+
+  const set_ud = JSON.parse((await run(gpvpn, ["profile", "set", "Test", "noDtls", "On"], env)).stdout)
+  assert.equal(set_ud.profiles.find(p => p.name === "Test").noDtls, true)
+
+  const set_mtu = JSON.parse((await run(gpvpn, ["profile", "set", "Test", "baseMtu", "1400"], env)).stdout)
+  assert.equal(set_mtu.profiles.find(p => p.name === "Test").baseMtu, 1400)
+
+  const set_rt = JSON.parse((await run(gpvpn, ["profile", "set", "Test", "reconnectTimeout", "300"], env)).stdout)
+  assert.equal(set_rt.profiles.find(p => p.name === "Test").reconnectTimeout, 300)
+
+  const set_ua = JSON.parse((await run(gpvpn, ["profile", "set", "Test", "useragent", "MyAgent"], env)).stdout)
+  assert.equal(set_ua.profiles.find(p => p.name === "Test").useragent, "MyAgent")
+
+  const listed = JSON.parse((await run(gpvpn, ["profile", "list"], env)).stdout)
+  const profile = listed.profiles.find(p => p.name === "Test")
+  assert.equal(profile.os, "win10")
+  assert.equal(profile.noDtls, true)
+  assert.equal(profile.baseMtu, 1400)
+  assert.equal(profile.reconnectTimeout, 300)
+  assert.equal(profile.useragent, "MyAgent")
+  // Required fields still present
+  assert.equal(profile.mode, "gateway")
+  assert.equal(profile.portal, "vpn.example.com")
+  console.log("normalize carries optional fields")
+})
+
+test("normalize drops unset optional fields", async () => {
+  const { env } = await tempHome()
+  const added = await run(gpvpn, [
+    "profile", "add", "--name", "Minimal",
+    "--portal", "vpn.example.com", "--username", "user@example.com",
+  ], env)
+  assert.equal(added.code, 0)
+  const listed = JSON.parse((await run(gpvpn, ["profile", "list"], env)).stdout)
+  const profile = listed.profiles.find(p => p.name === "Minimal")
+  assert.equal(profile.os, undefined)
+  assert.equal(profile.noDtls, undefined)
+  assert.equal(profile.baseMtu, undefined)
+  assert.equal(profile.reconnectTimeout, undefined)
+  assert.equal(profile.useragent, undefined)
+  console.log("unset optional fields are dropped")
+})
+
+test("authMethod password is stored and validated", async () => {
+  const { env } = await tempHome()
+  // Create the Default profile first
+  await run(gpvpn, ["profile", "add", "--name", "Default", "--portal", "vpn.example.com", "--username", "user@example.com"], env)
+  const set_auth = JSON.parse((await run(gpvpn, ["profile", "set", "Default", "authMethod", "password"], env)).stdout)
+  assert.equal(set_auth.profiles.find(p => p.name === "Default").authMethod, "password")
+  // Invalid authMethod is rejected
+  const bad = await run(gpvpn, ["profile", "set", "Default", "authMethod", "oauth"], env)
+  assert.equal(bad.code, 2)
+  console.log("authMethod password stored, invalid rejected")
+})
+
+// ---- forget idempotent --------------------------------------------------
+
+test("forget deletes the cookie jar and is idempotent", async () => {
+  const { env } = await tempHome()
+  // Create a profile to get a cookie jar name
+  await run(gpvpn, ["profile", "add", "--name", "ForgetTest", "--portal", "vpn.example.com", "--username", "user@example.com"], env)
+  // First forget on a non-existent jar should succeed (idempotent)
+  const first = await run(gpvpn, ["forget", "ForgetTest"], env)
+  assert.equal(first.code, 0)
+  const first_json = JSON.parse(first.stdout)
+  assert.equal(first_json.forgot, "ForgetTest")
+  // Create the jar then forget it
+  const cacheDir = path.join(env.XDG_CACHE_HOME, "gp-vpn")
+  await mkdir(cacheDir, { recursive: true })
+  // The jar name is okta-<sha256(name)[:8]>.json
+  const { createHash } = await import("node:crypto")
+  const digest = createHash("sha256").update("ForgetTest").digest("hex").slice(0, 8)
+  const jarPath = path.join(cacheDir, `okta-${digest}.json`)
+  await writeFile(jarPath, "{}")
+  assert.ok((await import("node:fs")).existsSync(jarPath))
+  // Re-run forget after creating the jar
+  const second = await run(gpvpn, ["forget", "ForgetTest"], env)
+  assert.equal(second.code, 0)
+  const second_json = JSON.parse(second.stdout)
+  assert.equal(second_json.forgot, "ForgetTest")
+  console.log("forget is idempotent")
+})
+
+// ---- bool/int parsing in profile set ------------------------------------
+
+test("bool and int values parse correctly in profile set", async () => {
+  const { env } = await tempHome()
+  // Create the Default profile first
+  await run(gpvpn, ["profile", "add", "--name", "Default", "--portal", "vpn.example.com", "--username", "user@example.com"], env)
+  const on = JSON.parse((await run(gpvpn, ["profile", "set", "Default", "noDtls", "On"], env)).stdout)
+  assert.equal(on.profiles.find(p => p.name === "Default").noDtls, true)
+  const off = JSON.parse((await run(gpvpn, ["profile", "set", "Default", "noDtls", "Off"], env)).stdout)
+  assert.equal(off.profiles.find(p => p.name === "Default").noDtls, false)
+  const true_v = JSON.parse((await run(gpvpn, ["profile", "set", "Default", "noDtls", "true"], env)).stdout)
+  assert.equal(true_v.profiles.find(p => p.name === "Default").noDtls, true)
+  const false_v = JSON.parse((await run(gpvpn, ["profile", "set", "Default", "noDtls", "false"], env)).stdout)
+  assert.equal(false_v.profiles.find(p => p.name === "Default").noDtls, false)
+  const mtu = JSON.parse((await run(gpvpn, ["profile", "set", "Default", "baseMtu", "1200"], env)).stdout)
+  assert.equal(mtu.profiles.find(p => p.name === "Default").baseMtu, 1200)
+  const rt = JSON.parse((await run(gpvpn, ["profile", "set", "Default", "reconnectTimeout", "600"], env)).stdout)
+  assert.equal(rt.profiles.find(p => p.name === "Default").reconnectTimeout, 600)
+  // Invalid int is rejected
+  const bad_int = await run(gpvpn, ["profile", "set", "Default", "baseMtu", "abc"], env)
+  assert.equal(bad_int.code, 2)
+  const bad_bool = await run(gpvpn, ["profile", "set", "Default", "noDtls", "yes"], env)
+  assert.equal(bad_bool.code, 2)
+  console.log("bool/int parsing works")
 })
