@@ -82,17 +82,16 @@ test("the panel keeps the theme rules that both shells enforce", async () => {
 
 test("shield colors come from what a theme color is, not its slot", async () => {
   const source = (await read("shieldColors.js")).replace(".pragma library", "")
-  const colors = new Function(`${source}; return { pick, palette }`)()
-  const signals = (text) => {
-    const palette = colors.palette(text)
-    return [colors.pick(palette, 140, 50, "ok"), colors.pick(palette, 38, 26, "busy"), colors.pick(palette, 0, 25, "fail")]
-  }
+  const colors = new Function(`${source}; return { signal }`)()
+  const signals = (text) => [colors.signal(text, "green", 140, 50, "ok"), colors.signal(text, "yellow", 38, 26, "busy"), colors.signal(text, "red", 0, 25, "fail")]
   // Scrambled slots: color1 is lime, color2 is red.
   const scrambled = `accent = "#BE3F50"\nforeground = "#14B9B5"\ncolor1 = "#c8e967"\ncolor2 = "#E20342"\ncolor3 = "#7cd699"\ncolor6 = "#FF7F41"\ncolor10 = "#f93d3b"\ncolor14 = "#ffbe74"\n`
   assert.deepEqual(signals(scrambled), ["#7cd699", "#ffbe74", "#f93d3b"])
   // A conventional palette.
   const plain = `color1 = "#f38ba8"\ncolor2 = "#a6e3a1"\ncolor3 = "#f9e2af"\ncolor4 = "#89b4fa"\n`
   assert.deepEqual(signals(plain), ["#a6e3a1", "#f9e2af", "#f38ba8"])
+  // A named color wins, even one the hue search would miss.
+  assert.deepEqual(signals(`green = "#9ece6a"\nyellow = "#e0af68"\nred = "#f7768e"\ncyan = "#449dab"\n`), ["#9ece6a", "#e0af68", "#f7768e"])
   // A monochrome theme has none, so the theme's own roles stand in.
   const mono = `color1 = "#888888"\ncolor2 = "#aaaaaa"\naccent = "#cccccc"\n`
   assert.deepEqual(signals(mono), ["ok", "busy", "fail"])

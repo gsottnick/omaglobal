@@ -1,0 +1,117 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>OmaGlobal preview</title>
+<!-- Laid out at 1920x1080 and captured at 2x by make-preview.py. The .png files are
+     the real dropdown and its shield, rendered at 2.5x with fake VPNs. -->
+<style>
+  :root {
+    --bg: #0c0e16;
+    --text: #c8d0f0;
+    --dim: #7c84a6;
+    --accent: #7aa2f7;
+    --ok: #9ece6a;
+    --line: rgba(122, 162, 247, 0.18);
+  }
+  * { margin: 0; box-sizing: border-box; }
+  html, body { width: 1920px; height: 1080px; overflow: hidden; }
+  body {
+    background:
+      radial-gradient(900px 700px at 82% 18%, rgba(122, 162, 247, 0.20), transparent 70%),
+      radial-gradient(800px 600px at 8% 95%, rgba(158, 206, 106, 0.11), transparent 70%),
+      radial-gradient(rgba(200, 208, 240, 0.07) 1px, transparent 1px) 0 0 / 28px 28px,
+      var(--bg);
+    color: var(--text);
+    font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", monospace;
+    position: relative;
+  }
+
+  /* A slice of the Omarchy bar, with the widget connected. */
+  .bar {
+    position: absolute; inset: 0 0 auto 0; height: 44px;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 28px; background: rgba(22, 24, 36, 0.92);
+    border-bottom: 1px solid var(--line); font-size: 17px; color: var(--dim);
+  }
+  .bar .ws span { margin-right: 18px; }
+  .bar .ws span.on { color: var(--text); }
+  .bar .right { display: flex; align-items: center; gap: 26px; }
+  .bar .widget { display: flex; align-items: center; gap: 10px; color: var(--ok); }
+  .bar svg { width: 18px; height: 21px; display: block; }
+
+  .copy { position: absolute; left: 110px; top: 150px; width: 800px; }
+  .eyebrow { font-size: 18px; letter-spacing: 0.32em; color: var(--accent); }
+  h1 {
+    margin-top: 22px; font-size: 118px; line-height: 1; letter-spacing: -0.02em;
+    background: linear-gradient(100deg, #e4e9ff 10%, var(--accent) 62%, var(--ok));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .tagline { margin-top: 26px; font-size: 30px; line-height: 1.4; color: var(--text); }
+  ul { list-style: none; padding: 0; margin-top: 40px; }
+  li { position: relative; padding-left: 38px; margin-bottom: 15px; font-size: 20px; line-height: 1.45; color: var(--dim); }
+  li b { color: var(--text); font-weight: 600; }
+  li::before {
+    content: ""; position: absolute; left: 4px; top: 11px; width: 12px; height: 12px;
+    border-radius: 3px; background: var(--accent); box-shadow: 0 0 14px var(--accent);
+  }
+
+  /* The shield in each state, from the running panel. */
+  .states { display: flex; gap: 14px; margin-top: 26px; }
+  .states div {
+    width: 152px; padding: 14px 0 12px; text-align: center; font-size: 14px; color: var(--dim);
+    background: TILE; border: 1px solid var(--line); border-radius: 4px;
+  }
+  .states img { height: 70px; display: block; margin: 0 auto 8px; }
+
+  .foot { position: absolute; left: 110px; bottom: 56px; font-size: 17px; color: var(--dim); letter-spacing: 0.04em; }
+  .foot span { color: var(--accent); margin: 0 12px; }
+
+  .shot { position: absolute; width: 440px; border-radius: 4px; }
+  .shot.front {
+    right: 28px; top: 54px;
+    box-shadow: 0 40px 90px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(122, 162, 247, 0.25), 0 0 120px rgba(122, 162, 247, 0.22);
+  }
+  .shot.back {
+    right: 500px; top: 300px; transform: rotate(-3deg); opacity: 0.94; width: 420px;
+    box-shadow: 0 40px 90px rgba(0, 0, 0, 0.7), 0 0 90px rgba(158, 206, 106, 0.14);
+  }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <div class="ws"><span class="on">1</span><span>2</span><span>3</span></div>
+    <div class="right">
+      <span>10:42</span>
+      <div class="widget">
+        <svg viewBox="0 0 100 116"><path fill="#9ece6a" d="M 50 4 L 92 18 L 92 56 C 92 84 72 104 50 112 C 28 104 8 84 8 56 L 8 18 Z"/><path fill="none" stroke="#161824" stroke-width="10" d="M 31 58 L 45 72 L 70 40"/></svg>
+        172.16.8.8
+      </div>
+    </div>
+  </div>
+
+  <div class="copy">
+    <div class="eyebrow">OMARCHY BAR PLUGIN</div>
+    <h1>OmaGlobal</h1>
+    <p class="tagline">Free GlobalProtect VPN,<br>one click from your bar.</p>
+    <ul>
+      <li><b>Type the address, press Connect:</b> SSO and two-factor sign in through a window</li>
+      <li><b>One-button install:</b> everything it needs, set up for you</li>
+      <li><b>Every VPN you use, saved:</b> switch between them in one click</li>
+      <li><b>Every option, explained:</b> gateways, certificates, MTU and more</li>
+      <li><b>A shield that tells you where you stand,</b> animated in your theme's colors</li>
+    </ul>
+    <div class="states">
+      <div><img src="state-off.png" alt="">Disconnected</div>
+      <div><img src="state-busy.png" alt="">Connecting</div>
+      <div><img src="state-on.png" alt="">Connected</div>
+      <div><img src="state-fail.png" alt="">Failed</div>
+    </div>
+  </div>
+
+  <img class="shot back" src="options.png" alt="">
+  <img class="shot front" src="connected.png" alt="">
+
+  <div class="foot">One setup step asks for your password<span>·</span>Free software<span>·</span>Not affiliated with Palo Alto Networks</div>
+</body>
+</html>
