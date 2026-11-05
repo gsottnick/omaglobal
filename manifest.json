@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.gsottnick.omaglobal",
   "name": "OmaGlobal",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "author": "Gavin Sottnick",
   "license": "GPL-3.0-or-later AND MIT",
   "description": "Free GlobalProtect VPN from the Omarchy bar, no CLI needed: one-button install, type the portal address, press Connect, sign in once. Multiple VPNs, gateway picker, advanced openconnect options, auto-connect, notifications. One-time setup runs in a terminal (only step that asks for a password). Not affiliated with Palo Alto Networks or the GP Connect app.",

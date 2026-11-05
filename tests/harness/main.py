@@ -7,6 +7,7 @@ import os
 import socket
 import time
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -44,9 +45,36 @@ PUSH = {
         "iface": "tun0",
         "since": int(time.time()) - 600,
     },
+    # What a real session reads like, for the marketplace picture.
+    "preview": {
+        "state": "connected",
+        "ip": "172.16.8.8",
+        "gateway": "US-East",
+        "expires": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() + 29 * 86400 + 3600)),
+        "user": "user@example.com",
+        "rxBytes": 1730000000,
+        "txBytes": 94000000,
+        "iface": "tun0",
+        "since": int(time.time()) - 2520,
+    },
     "failed": {"state": "dropped",
                "message": "The connection ended unexpectedly. Check your internet connection."},
 }
+
+
+def apply_theme(theme: Path, font_size: int) -> None:
+    """Point HOME at a throwaway Omarchy config, so a picture does not depend on
+    the theme of the machine that rendered it."""
+    if not theme.is_dir():
+        raise SystemExit(f"no such theme: {theme}")
+    home = Path(tempfile.mkdtemp(prefix="omarchy-home-"))
+    current = home / ".local" / "state" / "omarchy" / "current"
+    current.mkdir(parents=True)
+    (current / "theme").symlink_to(theme)
+    config = home / ".config" / "omarchy"
+    config.mkdir(parents=True)
+    (config / "shell.toml").write_text(f"[font]\nbase-size = {font_size}\n")
+    os.environ["HOME"] = str(home)
 
 
 def build_import_root(omarchy_shell: Path) -> Path:
@@ -498,6 +526,18 @@ def apply_step(step, plugin, store):
         print(f"WATCHED {target}.{prop} {seen}", flush=True)
         if wanted in seen or "on" not in seen:
             raise SystemExit(f"STEP FAILED: {target}.{prop} went {seen}")
+    elif name == "panelshot":
+        # The dropdown draws inside a transparent window: keep its opaque part.
+        from PySide6.QtGui import QBitmap, QGuiApplication, QRegion
+
+        window = max((w for w in QGuiApplication.allWindows() if w.isVisible()), key=lambda w: w.height())
+        grab = window.grabWindow()
+        grab.copy(QRegion(QBitmap.fromImage(grab.createAlphaMask())).boundingRect()).save(argument)
+    elif name == "itemshot":
+        target, _, path = argument.partition(":")
+        item = resolve(plugin, target)
+        grab = item.window().grabWindow()
+        grab.copy(item.mapRectToScene(item.boundingRect()).toAlignedRect()).save(path)
     elif name == "film":
         # film:dir:frames:gap_ms grabs a run of frames from the live animation.
         from PySide6.QtGui import QGuiApplication
@@ -563,10 +603,14 @@ def main() -> int:
     parser.add_argument("--settle", type=int, default=400)
     parser.add_argument("--step-delay", type=int, default=200)
     parser.add_argument("--trace", action="store_true")
+    parser.add_argument("--theme", default="")
+    parser.add_argument("--font-size", type=int, default=12)
     args = parser.parse_args()
 
     omarchy = Path(args.omarchy).expanduser().resolve()
     import_root = build_import_root(omarchy)
+    if args.theme:
+        apply_theme(omarchy.parent / "themes" / args.theme, args.font_size)
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QGuiApplication(sys.argv[:1])
     engine = QQmlApplicationEngine()

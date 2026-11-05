@@ -47,3 +47,10 @@ function palette(text) {
     found.push(match[1])
   return found
 }
+
+// A color the theme names outright means what it says. Older themes only number
+// their colors, so those are read by hue.
+function signal(text, name, hue, tolerance, fallback) {
+  var named = new RegExp("^\\s*" + name + "\\s*=\\s*[\"']?(#[0-9A-Fa-f]{6})", "m").exec(String(text || ""))
+  return named ? named[1] : pick(palette(text), hue, tolerance, fallback)
+}

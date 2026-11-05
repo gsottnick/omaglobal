@@ -1,5 +1,7 @@
 # OmaGlobal
 
+![OmaGlobal in the Omarchy bar](preview.png)
+
 Any GlobalProtect VPN, in the Omarchy bar: work, school, or your own. Type the portal address once, press Connect, sign in when the window appears, done. No command line after that.
 
 OmaGlobal is not affiliated with Palo Alto Networks or the GP Connect app.

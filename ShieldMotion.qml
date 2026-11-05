@@ -38,11 +38,11 @@ Singleton {
 
   readonly property color quietTint: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.6)
   // The shell has no success color (bar.active defaults to urgent), so these
-  // come from the theme's palette, followed live when the theme changes.
-  property var palette: []
-  readonly property color okTint: ShieldColors.pick(palette, 140, 50, Commons.Color.accent)
-  readonly property color busyTint: ShieldColors.pick(palette, 38, 26, Commons.Color.accent)
-  readonly property color failTint: ShieldColors.pick(palette, 0, 25, Commons.Color.urgent)
+  // come from the theme's own colors, followed live when the theme changes.
+  property string themeText: ""
+  readonly property color okTint: ShieldColors.signal(themeText, "green", 140, 50, Commons.Color.accent)
+  readonly property color busyTint: ShieldColors.signal(themeText, "yellow", 38, 26, Commons.Color.accent)
+  readonly property color failTint: ShieldColors.signal(themeText, "red", 0, 25, Commons.Color.urgent)
 
   property color tint: quietTint // Shield, state word and bar text all follow this.
   property real fill: 0 // Solid body, growing from the center.
@@ -63,7 +63,7 @@ Singleton {
     path: Commons.Color.currentThemePath + "/colors.toml"
     watchChanges: true
     printErrors: false
-    onLoaded: motion.palette = ShieldColors.palette(text())
+    onLoaded: motion.themeText = text()
     onFileChanged: reload()
   }
 
