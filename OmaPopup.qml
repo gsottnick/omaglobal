@@ -2,6 +2,7 @@
 import QtQuick
 import QtQuick.Controls
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "."
 
@@ -20,7 +21,7 @@ Column {
     width: parent.width
     wrapMode: Text.WordWrap
     textFormat: Text.PlainText
-    color: Color.foreground
+    color: Commons.Color.foreground
     font.family: Style.font.family
     font.pixelSize: Style.font.bodySmall
   }
@@ -31,7 +32,7 @@ Column {
     width: parent.width
     wrapMode: Text.WordWrap
     textFormat: Text.PlainText
-    color: Color.foreground
+    color: Commons.Color.foreground
     opacity: 0.6
     font.family: Style.font.family
     font.pixelSize: Style.font.bodySmall
@@ -71,7 +72,7 @@ Column {
       width: parent.width
       horizontalAlignment: Text.AlignHCenter
       textFormat: Text.PlainText
-      color: hero.title ? Color.foreground : ShieldMotion.tint
+      color: hero.title ? Commons.Color.foreground : ShieldMotion.tint
       font.family: Style.font.family
       font.pixelSize: Style.font.body
       text: hero.stateWord
@@ -91,7 +92,7 @@ Column {
       horizontalAlignment: Text.AlignHCenter
       visible: hero.who !== ""
       textFormat: Text.PlainText
-      color: Color.foreground
+      color: Commons.Color.foreground
       opacity: 0.6
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
@@ -118,7 +119,7 @@ Column {
       visible: hero.connecting
       wrapMode: Text.WordWrap
       textFormat: Text.PlainText
-      color: Color.foreground
+      color: Commons.Color.foreground
       opacity: 0.7
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
@@ -366,7 +367,7 @@ Column {
             objectName: "setupGroupIcon"
             text: modelData.ready ? "\u{f00c}" : "\u{f00d}"
             textFormat: Text.PlainText
-            color: modelData.ready ? Color.accent : Color.urgent
+            color: modelData.ready ? Commons.Color.accent : Commons.Color.urgent
             font.family: Style.font.family
             font.pixelSize: Style.font.body
           }
@@ -376,7 +377,7 @@ Column {
             Text {
               width: parent.width
               textFormat: Text.PlainText
-              color: Color.foreground
+              color: Commons.Color.foreground
               font.family: Style.font.family
               font.pixelSize: Style.font.body
               text: modelData.label + (modelData.ready ? " — ready"
@@ -469,7 +470,7 @@ Column {
       width: parent.width
       wrapMode: Text.WordWrap
       textFormat: Text.PlainText
-      color: Color.urgent
+      color: Commons.Color.urgent
       font.family: Style.font.family
       font.pixelSize: Style.font.body
       text: OmaStore.installError !== "" ? OmaStore.installError : "Something went wrong."
@@ -569,7 +570,7 @@ Column {
       width: parent.width
       wrapMode: Text.WordWrap
       textFormat: Text.PlainText
-      color: Color.urgent
+      color: Commons.Color.urgent
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       text: OmaStore.message
@@ -607,7 +608,7 @@ Column {
         width: parent.width
         wrapMode: Text.WordWrap
         textFormat: Text.PlainText
-        color: Color.foreground
+        color: Commons.Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
         text: "Password for " + OmaStore.activeProfile
@@ -643,7 +644,7 @@ Column {
         objectName: "vpnIp"
         width: parent.width
         textFormat: Text.PlainText
-        color: Color.foreground
+        color: Commons.Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
         text: "Address  " + OmaStore.ip
@@ -653,7 +654,7 @@ Column {
         width: parent.width
         elide: Text.ElideRight
         textFormat: Text.PlainText
-        color: Color.foreground
+        color: Commons.Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
         text: "Up for  " + OmaStore.upFor()
@@ -663,7 +664,7 @@ Column {
         width: parent.width
         elide: Text.ElideRight
         textFormat: Text.PlainText
-        color: Color.foreground
+        color: Commons.Color.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
         text: "Gateway  " + OmaStore.gateway
@@ -675,7 +676,7 @@ Column {
         Text {
           text: "Expires"
           textFormat: Text.PlainText
-          color: Color.foreground
+          color: Commons.Color.foreground
           opacity: 0.6
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
@@ -684,7 +685,7 @@ Column {
           text: OmaStore.expiresText()
           elide: Text.ElideRight
           textFormat: Text.PlainText
-          color: Color.foreground
+          color: Commons.Color.foreground
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }
@@ -697,7 +698,7 @@ Column {
         Text {
           text: "Data"
           textFormat: Text.PlainText
-          color: Color.foreground
+          color: Commons.Color.foreground
           opacity: 0.6
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
@@ -706,7 +707,7 @@ Column {
           text: OmaStore.humanBytes(OmaStore.rxBytes) + " down  " + OmaStore.humanBytes(OmaStore.txBytes) + " up"
           elide: Text.ElideRight
           textFormat: Text.PlainText
-          color: Color.foreground
+          color: Commons.Color.foreground
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }
@@ -720,7 +721,7 @@ Column {
       width: parent.width
       wrapMode: Text.WordWrap
       textFormat: Text.PlainText
-      color: Color.foreground
+      color: Commons.Color.foreground
       font.family: Style.font.family
       font.pixelSize: Style.font.body
       text: "Switching to " + OmaStore.switchingName + "…"
@@ -732,7 +733,7 @@ Column {
       width: parent.width
       wrapMode: Text.WordWrap
       textFormat: Text.PlainText
-      color: Color.urgent
+      color: Commons.Color.urgent
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       text: OmaStore.message
@@ -868,7 +869,7 @@ Column {
         contentItem: Rectangle {
           implicitWidth: Style.space(3)
           radius: width / 2
-          color: Color.muted
+          color: Commons.Color.muted
           opacity: editorScroll.contentHeight > editorScroll.height ? 0.7 : 0
         }
         background: null
@@ -1224,7 +1225,7 @@ Column {
       width: parent.width
       wrapMode: Text.WordWrap
       textFormat: Text.PlainText
-      color: Color.urgent
+      color: Commons.Color.urgent
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       text: OmaStore.editorError

@@ -61,6 +61,8 @@ test("the panel keeps the theme rules that both shells enforce", async () => {
   assert.match(motion, /Color\.urgent/)
   assert.doesNotMatch(panel + popup + store + motion + mark, /Color\.error/)
   assert.doesNotMatch(panel + popup + store + motion + mark, /#[0-9A-Fa-f]{3,8}\b/)
+  // Qt 6.12 ships its own Color type. The harness runs 6.11 and cannot see this.
+  for (const text of [panel, popup, motion, mark]) assert.doesNotMatch(text, /(?<![.\w])Color\./)
   // Motion runs on the display's clock and honors the reduced-motion setting.
   assert.doesNotMatch(panel + popup + motion + mark, /\bTimer\b/)
   assert.match(motion, /!Style\.reduceMotion/)

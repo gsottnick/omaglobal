@@ -2,6 +2,7 @@
 import QtQuick
 import QtQuick.Shapes
 import qs.Commons
+import qs.Commons as Commons
 import "."
 
 // The shield, drawn from ShieldMotion. All sizes are in a 100 by 116 box. Moving
@@ -104,7 +105,7 @@ Item {
     // The tick, knocked out of the solid body.
     Outline {
       visible: ShieldMotion.check > 0.001
-      strokeColor: Color.background
+      strokeColor: Commons.Color.background
       strokeWidth: mark.strong
       strokeStyle: ShapePath.DashLine
       dashPattern: [mark.checkLength / strokeWidth, mark.checkLength / strokeWidth]

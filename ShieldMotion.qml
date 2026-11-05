@@ -5,6 +5,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import "."
 import "shieldColors.js" as ShieldColors
 
@@ -35,13 +36,13 @@ Singleton {
     return screen === "main" || screen === "editor" ? "off" : "ready"
   }
 
-  readonly property color quietTint: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.6)
+  readonly property color quietTint: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.6)
   // The shell has no success color (bar.active defaults to urgent), so these
   // come from the theme's palette, followed live when the theme changes.
   property var palette: []
-  readonly property color okTint: ShieldColors.pick(palette, 140, 50, Color.accent)
-  readonly property color busyTint: ShieldColors.pick(palette, 38, 26, Color.accent)
-  readonly property color failTint: ShieldColors.pick(palette, 0, 25, Color.urgent)
+  readonly property color okTint: ShieldColors.pick(palette, 140, 50, Commons.Color.accent)
+  readonly property color busyTint: ShieldColors.pick(palette, 38, 26, Commons.Color.accent)
+  readonly property color failTint: ShieldColors.pick(palette, 0, 25, Commons.Color.urgent)
 
   property color tint: quietTint // Shield, state word and bar text all follow this.
   property real fill: 0 // Solid body, growing from the center.
@@ -59,7 +60,7 @@ Singleton {
 
   FileView {
     id: themeColors
-    path: Color.currentThemePath + "/colors.toml"
+    path: Commons.Color.currentThemePath + "/colors.toml"
     watchChanges: true
     printErrors: false
     onLoaded: motion.palette = ShieldColors.palette(text())
@@ -68,7 +69,7 @@ Singleton {
 
   // A theme swap repoints a directory, which a file watch does not see.
   Connections {
-    target: Color
+    target: Commons.Color
     function onAccentChanged() { themeColors.reload() }
     function onForegroundChanged() { themeColors.reload() }
   }
@@ -85,7 +86,7 @@ Singleton {
     states: [
       State {
         name: "ready"
-        PropertyChanges { target: motion; tint: Color.accent }
+        PropertyChanges { target: motion; tint: Commons.Color.accent }
       },
       State {
         name: "off"
