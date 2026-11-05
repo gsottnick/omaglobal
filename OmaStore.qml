@@ -53,6 +53,9 @@ Singleton {
   property string expires: ""
   property string userName: ""
   property string message: ""
+  // The tunnel's own last lines behind the message. The failed card shows
+  // them behind a "(see More)" toggle.
+  property string detail: ""
   property string statusLine: "Not set up"
   property var profiles: []
   property var gateways: []
@@ -345,6 +348,7 @@ Singleton {
     expires = redact(obj.expires || "")
     userName = String(obj.user || "")
     message = redact(obj.message || "")
+    detail = redact(obj.detail || "")
     gateways = obj.gateways || []
     rxBytes = Number(obj.rxBytes) || 0
     txBytes = Number(obj.txBytes) || 0
@@ -406,6 +410,7 @@ Singleton {
     connectError = ""
     // A new attempt starts with a clean slate: no stale failure text.
     message = ""
+    detail = ""
     phase = "off"
     rawState = "idle"
     refreshStatus()
@@ -426,6 +431,7 @@ Singleton {
     sock.write('{"cmd":"disconnect"}\n')
     sock.flush()
     message = ""
+    detail = ""
     phase = "off"
     rawState = "idle"
     refreshStatus()

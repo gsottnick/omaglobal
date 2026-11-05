@@ -469,6 +469,9 @@ class Daemon:
         self.expires = ""
         self.since = 0
         self.message = ""
+        # The tunnel's own last lines, for the dropdown's "(see More)" and
+        # for an agent reading status after the fact.
+        self.detail = ""
         self.server_host = ""
         self.gateways: list[dict[str, object]] = []
         self.manual_gateway = ""
@@ -490,6 +493,7 @@ class Daemon:
             "expires": self.expires,
             "since": self.since,
             "message": self.message,
+            "detail": self.detail,
             "server": self.server_host,
             "gateways": self.gateways,
             "rxBytes": self.rx_bytes,
@@ -633,6 +637,7 @@ class Daemon:
             if state == "connected":
                 self.since = int(time.time())
                 self.message = ""
+                self.detail = ""
             snap = dict(self.public())
         if self.verbose:
             print(f"state {state}", file=sys.stderr)
@@ -739,6 +744,7 @@ class Daemon:
             self.ip = ""
             self.expires = ""
             self.message = ""
+            self.detail = ""
             self.gateways = []
             self.recent_lines = []
             self.last_line = ""
@@ -762,6 +768,7 @@ class Daemon:
             self.ip = ""
             self.expires = ""
             self.message = ""
+            self.detail = ""
             self.server_host = ""
             snap = dict(self.public())
         self._kill(proc)
@@ -787,8 +794,8 @@ class Daemon:
                 text=True,
                 pass_fds=fds_to_pass,
             )
-        except OSError:
-            self._enter("failed", message="Could not start the tunnel")
+        except OSError as err:
+            self._enter("failed", message="Could not start the tunnel", detail=str(err))
             return
         # Close parent-side copies of the validated fds immediately.
         # The child keeps them via pass_fds.
@@ -834,9 +841,11 @@ class Daemon:
                 self._enter("idle")
             return
         if current == "connected":
-            self._enter("dropped", message="The connection ended unexpectedly. Check your internet connection.")
+            self._enter("dropped", message="The connection ended unexpectedly. Check your internet connection.",
+                        detail="\n".join(self.recent_lines))
         else:
-            self._enter("failed", message=explain_failure(self.recent_lines))
+            self._enter("failed", message=explain_failure(self.recent_lines),
+                        detail="\n".join(self.recent_lines))
 
     def _on_output(self, line: str) -> None:
         with self.lock:

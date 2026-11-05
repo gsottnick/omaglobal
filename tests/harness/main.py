@@ -58,7 +58,8 @@ PUSH = {
         "since": int(time.time()) - 2520,
     },
     "failed": {"state": "dropped",
-               "message": "The connection ended unexpectedly. Check your internet connection."},
+               "message": "The connection ended unexpectedly. Check your internet connection.",
+               "detail": "Disconnected from gateway PROD-EXAMPLE.\n connect: Network is unreachable"},
 }
 
 
@@ -217,6 +218,13 @@ def snapshot(plugin, store):
         "pulseRunning": bool(plugin.findChild(type(plugin), "authPulse")) if False else None,
         "statusLine": phase_text,
         "errorLine": read_prop(error, "text", "") if plugin is not None else "",
+        "detail": read_prop(store, "detail", "") if store is not None else "",
+        "failDetailToggleVisible": read_prop(
+            plugin.findChild(QObject, "failDetailToggle") if plugin is not None else None,
+            "visible", None),
+        "failDetailText": read_prop(
+            plugin.findChild(QObject, "failDetailText") if plugin is not None else None,
+            "text", ""),
         "connectText": read_prop(connect_button, "text", "") if plugin is not None else "",
         "barIp": read_prop(plugin.findChild(QObject, "barIp"), "text", "") if plugin is not None else "",
         "ip": read_prop(plugin, "vpnIp", ""),
