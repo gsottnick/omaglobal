@@ -1,6 +1,6 @@
 # OmaGlobal
 
-Your company's GlobalProtect VPN, in the Omarchy bar. Type the portal address once, press Connect, sign in when the window appears, done. No command line after that.
+Any GlobalProtect VPN, in the Omarchy bar: work, school, or your own. Type the portal address once, press Connect, sign in when the window appears, done. No command line after that.
 
 OmaGlobal is not affiliated with Palo Alto Networks or the GP Connect app.
 
@@ -8,7 +8,7 @@ OmaGlobal is not affiliated with Palo Alto Networks or the GP Connect app.
 
 1. Add the plugin to the bar.
 2. Click its icon and press **Install**. A terminal opens and asks for your password once. When it says `Setup finished.`, you can close it. The dropdown moves on by itself.
-3. On the welcome screen, type your VPN portal address (like `vpn.yourcompany.com`) and press **Connect**. Sign in when the window appears. Ask IT if you don't know the address; they will call it the "GlobalProtect portal".
+3. On the welcome screen, type your VPN portal address (like `vpn.example.com`) and press **Connect**. Sign in when the window appears. If you don't know it, ask whoever runs the VPN for the "GlobalProtect portal address".
 
 That's it. The icon turns green when you are connected.
 
@@ -22,14 +22,14 @@ Three steps, in plain words: **Opening sign-in** (the sign-in window is coming u
 
 ## Advanced options
 
-Under **Edit → Advanced options** every openconnect setting that matters has a one-line explanation: gateway choice, portal vs gateway sign-in, password sign-in instead of SSO, the system type reported to the VPN, the host-check (HIP) script some gateways demand, server certificate pinning, company certificate authorities, client certificates, tunnel packet size, TLS-only mode on networks that block UDP, reconnect patience, and a custom routing script. You only touch these when IT tells you to.
+Under **Edit → Advanced options** every openconnect setting that matters has a one-line explanation: gateway choice, portal vs gateway sign-in, password sign-in instead of SSO, the system type reported to the VPN, the host-check (HIP) script some gateways demand, server certificate pinning, custom certificate authorities, client certificates, tunnel packet size, TLS-only mode on networks that block UDP, reconnect patience, and a custom routing script. You only touch these when your VPN provider tells you to.
 
 Sign-in is remembered between connections. **Forget saved sign-in** in the editor deletes it, so the next connect asks again.
 
 ## Known limits
 
 - WebKitGTK can paint a blank sign-in window on Hyprland. OmaGlobal sets `GDK_BACKEND=x11` and `WEBKIT_DISABLE_DMABUF_RENDERER=1` so the window draws. That is a workaround, not a fix in WebKit or Hyprland. See UPSTREAM.md.
-- Some gateways demand a Host Information Policy (HIP) report. OmaGlobal does not send one by default; if your gateway requires it, IT gives you a check script to put under Advanced options. For safety that script (and any custom routing script) must be installed by an admin: root-owned with safe permissions on the whole path. The HIP script itself runs as your user, never as root.
+- Some gateways demand a Host Information Policy (HIP) report. OmaGlobal does not send one by default; if your gateway requires it, whoever runs it gives you a check script to put under Advanced options. For safety that script (and any custom routing script) must be installed by an admin: root-owned with safe permissions on the whole path. The HIP script itself runs as your user, never as root.
 - A portal can hand back a cookie for the other interface. The connect retries once with the other interface string, then reports. It does not keep retrying.
 
 ## Optional: the command line
@@ -39,7 +39,7 @@ Everything above can also be done from a terminal. This is never required.
 ```
 tools/setup.sh                 # the same install the Install button runs
 gpvpn setup-check              # is the background service ready
-gpvpn profile add --name Work --portal vpn.yourcompany.com
+gpvpn profile add --name Work --portal vpn.example.com
 gpvpn connect --profile Work   # prompts/signs in as needed
 gpvpn status
 gpvpn disconnect

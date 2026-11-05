@@ -52,6 +52,8 @@ Column {
     property bool connected: false
     property bool failed: false
     property int connectStep: 0 // 1 sign-in, 2 gateway, 3 tunnel
+    // A screen title (setup, welcome, sign-in prompt), not a VPN state: never dimmed.
+    property bool title: false
 
     // One shield glyph (the font has exactly one); state is carried by
     // color and weight of the dimming instead of a separate outline cut.
@@ -60,8 +62,8 @@ Column {
     // accent is red in some themes, which reads as an error).
     readonly property color okColor: Color.bar.active
     readonly property color iconColor: connected ? okColor
-      : (failed ? Color.urgent : (connecting ? Color.accent : Color.foreground))
-    readonly property real iconOpacity: connected ? 1.0
+      : (failed ? Color.urgent : (connecting || title ? Color.accent : Color.foreground))
+    readonly property real iconOpacity: connected || connecting || title ? 1.0
       : (failed ? 0.9 : 0.4)
 
     Item {
@@ -92,7 +94,7 @@ Column {
         height: width
         radius: width / 2
         color: "transparent"
-        border.color: Color.accent
+        border.color: hero.okColor
         border.width: 2
         opacity: connected && progress < 1 ? 0.6 * (1 - progress) : 0
         scale: 0.6 + 0.9 * progress
@@ -138,8 +140,8 @@ Column {
       width: parent.width
       horizontalAlignment: Text.AlignHCenter
       textFormat: Text.PlainText
-      color: hero.iconColor
-      opacity: hero.connected || hero.failed || hero.connecting ? 1 : 0.4
+      color: hero.title ? Color.foreground : hero.iconColor
+      opacity: hero.connected || hero.failed || hero.connecting || hero.title ? 1 : 0.4
       font.family: Style.font.family
       font.pixelSize: Style.font.body
       text: hero.stateWord
@@ -250,7 +252,7 @@ Column {
       },
       {
         label: "Sign-in window",
-        why: "Logs you in with your company account",
+        why: "Opens the page where you sign in to your VPN",
         ready: present["webkit2gtk-4.1"] === true && present["gp-saml-gui"] === true
       },
       {
@@ -380,11 +382,12 @@ Column {
 
     StateHero {
       stateWord: "Set up OmaGlobal"
+      title: true
       who: ""
     }
 
     RowCaption {
-      text: "A company VPN you can run from this bar. One install step needs your password, then connecting is a single click."
+      text: "Connect to any GlobalProtect VPN from this bar. One install step needs your password, then connecting is a single click."
     }
 
     Column {
@@ -534,22 +537,23 @@ Column {
 
     StateHero {
       stateWord: "Welcome"
-      who: "Company VPN"
+      title: true
+      who: "GlobalProtect VPN"
     }
 
     RowCaption {
-      text: "This connects you to your company's GlobalProtect VPN. Type the portal address below, press Connect, and sign in when the window appears."
+      text: "Connect to any GlobalProtect VPN: work, school, or your own. Type the portal address below, press Connect, and sign in when the window appears."
     }
 
     HintCaption {
-      text: "Not sure what to type? Ask your IT team for the \u201cGlobalProtect portal address\u201d."
+      text: "Not sure what to type? Use the address whoever runs your VPN gave you, often called the \u201cportal address\u201d."
     }
 
     TextField {
       id: portalField
       objectName: "portalField"
       width: parent.width
-      placeholderText: "vpn.yourcompany.com"
+      placeholderText: "vpn.example.com"
       onAccepted: OmaStore.saveAndConnect(text, usernameField.text)
     }
 
@@ -581,7 +585,7 @@ Column {
         }
 
         HintCaption {
-          text: "The sign-in window knows your account. Only set this if IT gave you a separate VPN username."
+          text: "The sign-in window knows your account. Only set this if your VPN uses a separate username."
         }
       }
     }
@@ -624,6 +628,7 @@ Column {
         : (OmaStore.phase === "failed" ? (OmaStore.rawState === "dropped" ? "Dropped" : "Failed")
         : (root.connecting ? "Connecting" : "Disconnected")))
       who: root.askPassword ? "" : OmaStore.activeProfile
+      title: root.askPassword
       connecting: root.connecting
       connected: OmaStore.phase === "connected" && !root.askPassword
       failed: OmaStore.phase === "failed" && !root.askPassword
@@ -915,7 +920,7 @@ Column {
             id: editNameField
             objectName: "editorName"
             width: parent.width
-            placeholderText: "Work VPN"
+            placeholderText: "My VPN"
             onTextChanged: root.edit.name = text
           }
 
@@ -924,7 +929,7 @@ Column {
             id: editPortalField
             objectName: "editorPortal"
             width: parent.width
-            placeholderText: "vpn.yourcompany.com"
+            placeholderText: "vpn.example.com"
             onTextChanged: root.edit.portal = text
           }
 
@@ -1034,7 +1039,7 @@ Column {
             ]
             onPicked: function (value) { root.edit.os = value }
           }
-          HintCaption { text: "Only change this if IT says the VPN expects a different system." }
+          HintCaption { text: "Only change this if your VPN provider says it expects a different system." }
 
           // --- user agent ---
           RowCaption { text: "Browser identity sent at sign-in" }
@@ -1045,7 +1050,7 @@ Column {
             placeholderText: "Default — PAN GlobalProtect"
             onTextChanged: root.edit.useragent = text
           }
-          HintCaption { text: "Leave blank unless IT gives you a specific one." }
+          HintCaption { text: "Leave blank unless your VPN provider gives you one." }
 
           // --- HIP / csd wrapper ---
           RowCaption { text: "Security check script (HIP)" }
@@ -1077,10 +1082,10 @@ Column {
             id: editCaField
             objectName: "editorCafile"
             width: parent.width
-            placeholderText: "/path/to/company-ca.pem"
+            placeholderText: "/path/to/ca.pem"
             onTextChanged: root.edit.cafile = text
           }
-          HintCaption { text: "For VPNs that use a company-issued certificate authority." }
+          HintCaption { text: "For VPNs that use their own certificate authority." }
 
           // --- client cert/key ---
           RowCaption { text: "Client certificate and key" }
@@ -1109,7 +1114,7 @@ Column {
             placeholderText: "Default — negotiated automatically"
             onTextChanged: root.edit.baseMtu = text
           }
-          HintCaption { text: "Smaller values help on flaky links. Leave blank unless IT says otherwise." }
+          HintCaption { text: "Smaller values help on flaky links. Leave blank unless your VPN provider says otherwise." }
 
           // --- no dtls ---
           RowCaption { text: "Use TLS only" }

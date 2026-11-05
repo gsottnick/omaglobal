@@ -847,18 +847,11 @@ print('ARGV:', ' '.join(argv))
 test("map_failure maps known patterns to plain messages", () => {
   const result = spawnSync(
     "python3", ["-c", `
-def map_failure(last_line):
-    if not last_line: return None
-    lower = last_line.lower()
-    for pat in ["resolving","getaddrinfo","name or service not known"]:
-        if pat in lower: return "Could not find that VPN address. Check the spelling and try again."
-    for pat in ["connection refused","connection timed out","ssl","tls","network is unreachable","failed to connect"]:
-        if pat in lower: return "Could not reach the VPN server. Check the network and try again."
-    for pat in ["failed to authenticate","authentication","login failed","gateway refused","invalid username or password"]:
-        if pat in lower: return "The VPN refused the sign-in. Check your account with IT."
-    for pat in ["hip","host info","host information policy","csd"]:
-        if pat in lower: return "This VPN wants a security check. Ask IT for the check script (Advanced options)."
-    return None
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("gpvpnd", sys.argv[1])
+spec = importlib.util.spec_from_loader("gpvpnd", loader)
+mod = importlib.util.module_from_spec(spec); loader.exec_module(mod)
+map_failure = mod.map_failure  # the real function, not a copy
 
 tests = [
     ("Resolving vpn.example.com", "Could not find that VPN address"),
@@ -880,7 +873,7 @@ for line, expected in tests:
     else:
         assert result and expected in result, f"Expected '{expected}' in '{result}' for '{line}'"
 print("ALL MAP_FAILURE TESTS PASSED")
-`],
+`, new URL("../bin/gpvpnd", import.meta.url).pathname],
     { encoding: "utf8", timeout: 5000 },
   )
   assert.equal(result.status, 0, result.stderr || result.stdout)

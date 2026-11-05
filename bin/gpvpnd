@@ -220,13 +220,13 @@ def map_failure(last_line: str) -> str | None:
     ]
     for pat in auth_patterns:
         if pat in lower:
-            return "The VPN refused the sign-in. Check your account with IT."
+            return "The VPN refused the sign-in. Check your username and password, or ask whoever runs the VPN."
 
     # HIP / host info
     hip_patterns = ["hip", "host info", "host information policy", "csd"]
     for pat in hip_patterns:
         if pat in lower:
-            return "This VPN wants a security check. Ask IT for the check script (Advanced options)."
+            return "This VPN wants a security check. Ask whoever runs the VPN for the check script (Advanced options)."
 
     return None
 
@@ -670,7 +670,7 @@ class Daemon:
         # running the user's script directly.  Refuse when we can't
         # resolve the peer's username.
         if csd_user is None and isinstance(options, dict) and "csdWrapper" in options:
-            return {"type": "error", "message": "Cannot determine your user name for csdWrapper. Contact IT."}
+            return {"type": "error", "message": "Cannot find your user name, so the security check script cannot run safely."}
 
         # Validate options against whitelist (pure check, no side effects)
         err = _validate_options(options, password_mode, usergroup, uid)
