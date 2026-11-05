@@ -16,11 +16,15 @@ Singleton {
   property bool installRunning: false
   property bool depsLoaded: false
   property bool ready: false
+  // Everything is installed except the current background service.
+  property bool updateOnly: false
   property var deps: []
   property string installStatus: ""
   property string installStep: ""
   property string installDetail: ""
   property string installError: ""
+  // A leftover "running" file from a closed terminal must not trap the dropdown.
+  property bool installRequested: false
   readonly property string installPath: {
     var base = String(Quickshell.env("XDG_STATE_HOME") || "")
     if (base.length === 0)
@@ -68,12 +72,11 @@ Singleton {
   property bool userAskedDisconnect: false
   property bool profilesLoaded: false
   property bool profileSaving: false
-  property bool connectAfterSave: false
+  property string connectAfterSave: ""
   property bool keepActive: false
   property bool socketSeen: false
   property int socketRetries: 0
   property bool socketRetrying: false
-  property var gatewayQueue: []
   property int notifyConnectCount: 0
   property int notifyDisconnectCount: 0
   property int notifyDropCount: 0
@@ -90,16 +93,20 @@ Singleton {
   // The per-profile editor. A null name means "add a new VPN".
   property bool editorOpen: false
   property string editorName: ""
-  // Advanced fields saved together with a brand-new profile: applied right
-  // after the profile exists (they name the profile, too).
-  property var pendingPairs: []
+  property string editorError: ""
+  // The VPN whose saved sign-in was just forgotten, so the button can say so.
+  property string forgotName: ""
+  // A password VPN is waiting for its password in the dropdown.
+  property bool askPassword: false
+  readonly property bool busy: phase === "auth" || phase === "connecting" || phase === "connected"
 
   // Which card the dropdown shows. Derived only; the views read this.
   readonly property string screen: {
     if (!depsLoaded)
       return "checking"
-    if (!ready) {
-      if (installStatus === "failed" && !installRunning)
+    // A plugin update must not hide Disconnect while a tunnel is up.
+    if (!ready && !busy) {
+      if (installStatus === "failed")
         return "installFailed"
       if (installRunning || installStatus === "running")
         return "installing"
@@ -212,22 +219,21 @@ Singleton {
   }
 
   function saveAndConnect(portal, username) {
-    var portalText = String(portal || "").trim()
-    var userText = String(username || "").trim()
-    if (!portalText) {
+    if (saveProc.running)
+      return
+    if (!String(portal || "").trim()) {
       fail("Enter your VPN portal address.")
       return
     }
-    var name = portalName(portalText)
-    if (addProc.running)
-      return
-    activeProfile = name
-    connectAfterSave = true
+    var name = portalName(portal)
+    connectAfterSave = name
     profileSaving = true
-    addProc.command = [helper, "profile", "add", "--name", name, "--portal", portalText]
-    if (userText)
-      addProc.command.push("--username", userText)
-    addProc.running = true
+    saveProc.command = [helper, "profile", "save", "", JSON.stringify({
+      name: name,
+      portal: String(portal || ""),
+      username: String(username || "")
+    })]
+    saveProc.running = true
   }
 
   function fail(text) {
@@ -381,8 +387,14 @@ Singleton {
   }
 
   function connect() {
-    if (phase === "auth" || phase === "connecting" || phase === "connected")
+    if (busy)
       return
+    // Every route here (button, switch, reconnect, auto-connect) needs the password.
+    if (activeAuthMethod === "password" && passwordInput === "") {
+      askPassword = true
+      return
+    }
+    askPassword = false
     userAskedDisconnect = false
     connectPending = true
     connectHeard = false
@@ -394,7 +406,25 @@ Singleton {
     rawState = "idle"
     refreshStatus()
     connectProc.running = false
+    connectProc.stdinEnabled = true
     connectProc.running = true
+  }
+
+  // Stop whatever this attempt is doing, including an open sign-in window.
+  function cancel() {
+    askPassword = false
+    passwordInput = ""
+    switchPending = false
+    reconnectPending = false
+    switchingName = ""
+    connectPending = false
+    connectProc.running = false
+    sock.write('{"cmd":"disconnect"}\n')
+    sock.flush()
+    message = ""
+    phase = "off"
+    rawState = "idle"
+    refreshStatus()
   }
 
   function settleConnect() {
@@ -418,8 +448,11 @@ Singleton {
 
   // Take the current tunnel down and bring this profile up. One click.
   function switchTo(name) {
+    if (busy && name === activeProfile)
+      return
+    askPassword = false
     chooseProfile(name)
-    if (phase === "auth" || phase === "connecting" || phase === "connected") {
+    if (busy) {
       userAskedDisconnect = false
       reconnectPending = false
       switchPending = true
@@ -453,100 +486,72 @@ Singleton {
     activeProc.running = true
   }
 
-  function chooseGateway(name, host) {
-    // Empty name and host clear the override and let the portal choose.
-    setProfileFields([
-      ["gateway", String(host || "")],
-      ["gatewayName", String(name || "")]
-    ])
-  }
-
-  // Queue of [key, value] pairs applied one `profile set` at a time, then
-  // the list is reloaded. The queue keeps the single shared Process busy-free.
-  function setProfileFields(pairs) {
-    gatewayQueue = pairs.map(function (pair) {
-      return [helper, "profile", "set", activeProfile, pair[0], String(pair[1])]
-    })
-    if (!gatewayProc.running)
-      runGatewayQueue()
-  }
-
-  function runGatewayQueue() {
-    if (gatewayProc.running || gatewayQueue.length === 0)
-      return
-    var next = gatewayQueue[0]
-    gatewayQueue = gatewayQueue.slice(1)
-    gatewayProc.command = next
-    gatewayProc.running = true
-  }
-
   // Editor lifecycle. name === "" means a brand-new VPN.
   function openEditor(name) {
     editorName = String(name || "")
+    editorError = ""
+    forgotName = ""
     editorOpen = true
   }
 
   function closeEditor() {
     editorOpen = false
     editorName = ""
+    editorError = ""
   }
 
+  // The helper validates and writes everything at once; a problem keeps the
+  // editor open with the reason.
   function saveEditor(fields) {
-    // fields: {name, portal, username, authMethod, interface, os, useragent,
-    // csdWrapper, servercert, cafile, certificate, sslkey, baseMtu,
-    // noDtls, reconnectTimeout, vpncScript}
-    var name = String(fields.name || "").trim() || portalName(fields.portal)
-    var isNew = editorName === ""
-    var target = isNew ? name : editorName
-    var pairs = []
-    if (isNew) {
-      if (addProc.running)
-        return
-      addProc.command = [helper, "profile", "add", "--name", name, "--portal", String(fields.portal || "").trim()]
-      var user = String(fields.username || "").trim()
-      if (user)
-        addProc.command.push("--username", user)
-      addProc.running = true
-    } else if (String(fields.name || "").trim() && String(fields.name).trim() !== editorName) {
-      pairs.push(["name", String(fields.name).trim()])
+    if (saveProc.running)
+      return
+    editorError = ""
+    saveProc.command = [helper, "profile", "save", editorName, JSON.stringify(fields)]
+    saveProc.running = true
+  }
+
+  function applySave(text) {
+    var result = {}
+    try {
+      result = JSON.parse(text)
+    } catch (error) {
     }
-    var plain = ["portal", "username", "authMethod", "interface", "os", "useragent",
-                 "csdWrapper", "servercert", "cafile", "certificate", "sslkey", "vpncScript"]
-    for (var i = 0; i < plain.length; i++) {
-      var key = plain[i]
-      if (fields[key] === undefined)
-        continue
-      pairs.push([key, String(fields[key]).trim()])
-    }
-    if (fields.noDtls !== undefined)
-      pairs.push(["noDtls", fields.noDtls === true ? "On" : "Off"])
-    if (fields.baseMtu !== undefined && String(fields.baseMtu).trim() !== "")
-      pairs.push(["baseMtu", String(parseInt(fields.baseMtu, 10))])
-    if (fields.reconnectTimeout !== undefined && String(fields.reconnectTimeout).trim() !== "")
-      pairs.push(["reconnectTimeout", String(parseInt(fields.reconnectTimeout, 10))])
-    editorOpen = false
-    editorName = ""
-    if (isNew) {
-      // addProc applies the pairs once the profile exists.
-      pendingPairs = pairs
+    var next = connectAfterSave
+    connectAfterSave = ""
+    profileSaving = false
+    if (result.ok !== true) {
+      var why = String(result.error || "Could not save that VPN.")
+      if (next !== "")
+        fail(why)
+      else
+        editorError = why
       return
     }
-    chooseProfile(target)
-    setProfileFields(pairs)
+    if (next === "")
+      closeEditor()
+    keepActive = false
+    restartList()
+    if (next !== "") {
+      activeProfile = next
+      autoTried = true
+      connect()
+    }
   }
 
   function removeProfile(name) {
     if (removeProc.running)
       return
-    editorOpen = false
-    editorName = ""
-    if (activeProfile === name)
-      activeProfile = profiles.length > 1 ? String(profiles[0].name) : "Default"
+    if (name === activeProfile && busy)
+      disconnect()
+    closeEditor()
     removeProc.command = [helper, "profile", "remove", String(name || "")]
     removeProc.running = true
   }
 
+  property string forgettingName: ""
+
   function forgetSignIn(name) {
+    forgettingName = String(name || activeProfile)
     forgetProc.command = [helper, "forget", String(name || activeProfile)]
     forgetProc.running = true
   }
@@ -562,8 +567,8 @@ Singleton {
 
   function installSetup() {
     // The terminal is where the script asks for a password.
-    if (installProc.running)
-      return
+    installRequested = true
+    installProc.running = false
     installStatus = "running"
     installError = ""
     installProc.command = [
@@ -592,9 +597,13 @@ Singleton {
       var data = JSON.parse(text)
       deps = data.items || []
       ready = data.ready === true
+      updateOnly = !ready && deps.every(function (item) {
+        return item.present || !item.required || item.name === "gpvpnd"
+      })
     } catch (error) {
       deps = []
       ready = false
+      updateOnly = false
     }
     depsLoaded = true
     if (ready && !socketUp)
@@ -610,6 +619,8 @@ Singleton {
     }
     if (!data || !data.status)
       return
+    if (data.status === "running" && !installRequested)
+      return
     installStatus = String(data.status)
     installStep = String(data.step || "")
     installDetail = String(data.detail || "")
@@ -624,8 +635,8 @@ Singleton {
     try {
       var data = JSON.parse(text)
       profiles = data.profiles || []
-      if (!keepActive && data.active)
-        activeProfile = String(data.active)
+      if (!keepActive)
+        activeProfile = String(data.active || "")
     } catch (error) {
       profiles = []
     }
@@ -636,6 +647,12 @@ Singleton {
   function reloadProfiles() {
     if (!listProc.running)
       listProc.running = true
+  }
+
+  // After a write: a list already in flight may have read the old file.
+  function restartList() {
+    listProc.running = false
+    listProc.running = true
   }
 
   Component.onCompleted: {
@@ -650,6 +667,9 @@ Singleton {
     onConnectedChanged: {
       root.socketUp = connected
       root.refreshStatus()
+      // A restarted daemon closes the socket without an error.
+      if (!connected && !root.socketRetrying)
+        root.scheduleRetry()
       if (connected) {
         root.socketSeen = true
         root.socketRetries = 0
@@ -713,49 +733,27 @@ Singleton {
   }
 
   Process {
-    id: addProc
-    stderr: StdioCollector {
-      id: addErr
+    id: saveProc
+    stdout: StdioCollector {
       waitForEnd: true
-    }
-    onExited: function (code) {
-      var start = root.connectAfterSave
-      var savedName = root.activeProfile
-      if (start) {
-        root.profileSaving = false
-        root.connectAfterSave = false
-      }
-      if (code !== 0) {
-        root.profileSaving = false
-        root.connectAfterSave = false
-        root.fail(String(addErr.text || "").trim() || "Could not save that VPN.")
-        return
-      }
-      if (start) {
-        // The welcome flow: the profile exists now, sign in.
-        root.reloadProfiles()
-        root.autoTried = true
-        root.connect()
-        return
-      }
-      root.chooseProfile(savedName)
-      var pairs = root.pendingPairs
-      root.pendingPairs = []
-      if (pairs.length > 0)
-        root.setProfileFields(pairs)
-      else
-        root.reloadProfiles()
+      onStreamFinished: root.applySave(text)
     }
   }
 
   Process {
     id: removeProc
-    onExited: root.reloadProfiles()
+    onExited: {
+      root.keepActive = false
+      root.restartList()
+    }
   }
 
   Process {
     id: forgetProc
-    onExited: root.reloadProfiles()
+    onExited: {
+      root.forgotName = root.forgettingName
+      root.reloadProfiles()
+    }
   }
 
   Process {
@@ -824,6 +822,10 @@ Singleton {
   Process {
     id: activeProc
     command: [root.helper, "profile", "list"]
+    onExited: {
+      root.keepActive = false
+      root.restartList()
+    }
   }
 
   Process {
@@ -835,8 +837,14 @@ Singleton {
     id: installProc
     onRunningChanged: {
       root.installRunning = running
-      if (!running)
-        root.pokeSocket()
+      if (running)
+        return
+      // The terminal closed partway. Say so instead of spinning forever.
+      if (root.installStatus === "running") {
+        root.installStatus = "failed"
+        root.installError = "Setup was closed before it finished. Press Try again."
+      }
+      root.pokeSocket()
     }
   }
 
@@ -846,19 +854,6 @@ Singleton {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyDeps(text)
-    }
-  }
-
-  Process {
-    id: gatewayProc
-    command: [root.helper, "profile", "list"]
-    onExited: function (code) {
-      if (root.gatewayQueue.length > 0)
-        root.runGatewayQueue()
-      else {
-        listProc.running = false
-        listProc.running = true
-      }
     }
   }
 }

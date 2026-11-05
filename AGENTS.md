@@ -11,3 +11,7 @@ Do not run `tools/setup.sh` (it uses the user's sudo). Exercise the daemon with 
 Dev files stay untracked: virtualenvs, shell checkouts, and `tests/harness/.qsroot/`.
 
 Plugin-specific notes belong in the `omaglobal` skill, not in the general omarchy-plugin skill.
+
+Test fixtures print what the real tools print. `tests/fixtures/fake-openconnect` and `SAML_OK` come from openconnect 9.21 and the pinned gp-saml-gui source; never write a line there from memory.
+
+UI checks use the harness `mouse:` step, a real click at the control's position, then `expect:` on what changed. `click:` only emits the signal and cannot catch a dead control.

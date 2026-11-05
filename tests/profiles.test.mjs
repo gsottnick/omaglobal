@@ -3,19 +3,21 @@ import assert from "node:assert/strict"
 import path from "node:path"
 import { statSync } from "node:fs"
 import { mkdir, writeFile } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { existsSync } from "node:fs"
 import { gpvpn, tempHome, run } from "./support.mjs"
 
 test("profiles round-trip and mode is always gateway", async () => {
   const { env } = await tempHome()
   const first = await run(gpvpn, ["profile", "add", "--name", "Default", "--portal", "vpn.example.com", "--username", "user@example.com"], env)
   assert.equal(first.code, 0)
-  const second = await run(gpvpn, ["profile", "add", "--name", "Other"], env)
+  const second = await run(gpvpn, ["profile", "add", "--name", "Other", "--portal", "https://vpn.example.com/global-protect/"], env)
   assert.equal(second.code, 0)
   const listed = JSON.parse((await run(gpvpn, ["profile", "list"], env)).stdout)
   assert.equal(listed.profiles.length, 2)
   const other = listed.profiles.find((item) => item.name === "Other")
   assert.equal(other.portal, "vpn.example.com")
-  assert.equal(other.username, "user@example.com")
+  assert.equal(other.username, "")
   assert.equal(other.mode, "gateway")
   assert.equal(other.gateway, "")
   const forced = JSON.parse((await run(gpvpn, ["profile", "set", "Other", "mode", "portal"], env)).stdout)
@@ -37,7 +39,7 @@ test("connect without a profile exits 2 and says to add one", async () => {
   const { env } = await tempHome()
   const result = await run(gpvpn, ["connect", "--profile", "Default"], env)
   assert.equal(result.code, 2)
-  assert.match(result.stderr, /No such profile\. Add one with: gpvpn profile add/)
+  assert.match(result.stderr, /no longer saved/)
   console.log("no-profile exit 2")
 })
 
@@ -162,4 +164,71 @@ test("bool and int values parse correctly in profile set", async () => {
   const bad_bool = await run(gpvpn, ["profile", "set", "Default", "noDtls", "yes"], env)
   assert.equal(bad_bool.code, 2)
   console.log("bool/int parsing works")
+})
+
+const saved = async (env) => JSON.parse((await run(gpvpn, ["profile", "list"], env)).stdout)
+const save = async (env, name, fields) => JSON.parse((await run(gpvpn, ["profile", "save", name, JSON.stringify(fields)], env)).stdout)
+
+test("a save is all or nothing, and each refusal says what to fix", async () => {
+  const { env } = await tempHome()
+  assert.deepEqual(await save(env, "", { portal: "" }), { ok: false, error: "Enter the VPN portal address." })
+  assert.match((await save(env, "", { portal: "not a host" })).error, /does not look like a VPN address/)
+  assert.deepEqual(await save(env, "", { name: "Work", portal: "https://vpn.example.com/global-protect/" }), { ok: true, error: "" })
+  assert.equal((await saved(env)).profiles[0].portal, "vpn.example.com")
+  assert.equal((await saved(env)).profiles[0].username, "")
+  assert.match((await save(env, "Work", { portal: "vpn.example.com", authMethod: "password" })).error, /needs a username/)
+  assert.match((await save(env, "Work", { portal: "vpn.example.com", baseMtu: "abc" })).error, /Tunnel packet size/)
+  assert.match((await save(env, "Work", { portal: "vpn.example.com", cafile: "/no/such/file.pem" })).error, /certificate authority file/)
+  assert.equal((await saved(env)).profiles[0].authMethod, "sso")
+})
+
+test("blank fields clear a setting and every chosen value is stored", async () => {
+  const { env } = await tempHome()
+  await save(env, "", { name: "Work", portal: "vpn.example.com" })
+  const all = { portal: "vpn.example.com", username: "user@example.com", authMethod: "password", interface: "gateway", os: "win", noDtls: true, baseMtu: "1300", reconnectTimeout: "120", useragent: "PAN GlobalProtect" }
+  assert.equal((await save(env, "Work", all)).ok, true)
+  const row = (await saved(env)).profiles[0]
+  assert.equal(row.authMethod, "password")
+  assert.equal(row.interface, "gateway")
+  assert.equal(row.os, "win")
+  assert.equal(row.noDtls, true)
+  assert.equal(row.baseMtu, 1300)
+  assert.equal(row.reconnectTimeout, 120)
+  assert.equal((await save(env, "Work", { portal: "vpn.example.com", baseMtu: "", reconnectTimeout: "" })).ok, true)
+  const cleared = (await saved(env)).profiles[0]
+  assert.equal(cleared.baseMtu, undefined)
+  assert.equal(cleared.reconnectTimeout, undefined)
+  assert.equal(cleared.os, undefined)
+})
+
+test("renaming keeps the default, the saved sign-in, and refuses a duplicate", async () => {
+  const { env } = await tempHome()
+  await save(env, "", { name: "Work", portal: "vpn.example.com" })
+  await save(env, "", { name: "Home", portal: "vpn.example.net" })
+  await run(gpvpn, ["profile", "set", "Work", "active", "yes"], env)
+  const digest = (name) => createHash("sha256").update(name).digest("hex").slice(0, 8)
+  const jar = (name) => path.join(env.XDG_CACHE_HOME, "gp-vpn", `okta-${digest(name)}.json`)
+  await mkdir(path.dirname(jar("Work")), { recursive: true })
+  await writeFile(jar("Work"), "{}")
+  assert.match((await save(env, "Work", { name: "Home", portal: "vpn.example.com" })).error, /already have a VPN called Home/)
+  assert.equal((await save(env, "Work", { name: "Office", portal: "vpn.example.com" })).ok, true)
+  const store = await saved(env)
+  assert.equal(store.active, "Office")
+  assert.deepEqual(store.profiles.map((row) => row.name).sort(), ["Home", "Office"])
+  assert.ok(existsSync(jar("Office")))
+  await run(gpvpn, ["profile", "remove", "Office"], env)
+  assert.equal(existsSync(jar("Office")), false)
+  assert.equal((await saved(env)).active, "Home")
+})
+
+test("changing the portal drops that portal's gateways", async () => {
+  const { env } = await tempHome()
+  await save(env, "", { name: "Work", portal: "vpn.example.com" })
+  await run(gpvpn, ["profile", "set", "Work", "gateways", JSON.stringify([{ name: "EAST", host: "east.example.com", priority: 1 }])], env)
+  await save(env, "Work", { portal: "vpn.example.com", gateway: "east.example.com", gatewayName: "EAST" })
+  assert.equal((await saved(env)).profiles[0].gatewayName, "EAST")
+  await save(env, "Work", { portal: "vpn.example.net", gateway: "east.example.com", gatewayName: "EAST" })
+  const row = (await saved(env)).profiles[0]
+  assert.equal(row.gatewayName, "")
+  assert.equal(row.gateways, undefined)
 })

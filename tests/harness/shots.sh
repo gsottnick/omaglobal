@@ -5,7 +5,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$(dirname "$HERE")")"
 PY="$REPO/.venv-harness/bin/python"
 MAIN="$HERE/main.py"
-OUT="${1:-/tmp/opencode/omaglobal-shots-r4}"
+OUT="${1:-/tmp/opencode/omaglobal-shots}"
 SHELL_DIR="${2:-/usr/share/omarchy/shell}"
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -40,7 +40,7 @@ seed() {
 
 env_common() {
   env \
-    HARNESS_SCREEN=900x1700 \
+    HARNESS_SCREEN=900x1700 GPVPN_DAEMON="$REPO/bin/gpvpnd" \
     QT_QPA_PLATFORM=offscreen \
     XDG_CONFIG_HOME="$ROOT/config" XDG_CACHE_HOME="$ROOT/cache" \
     XDG_DATA_HOME="$ROOT/data" XDG_STATE_HOME="$ROOT/state" \
@@ -92,6 +92,9 @@ echo "== 7 editor + advanced"
 run "open,waitScreen:main,click:profileEditButton,wait:600,shot:$OUT/10-editor-top.png,click:editorAdvancedToggle,wait:800,shot:$OUT/10b-advanced-open.png"
 run "open,waitScreen:main,click:profileEditButton,wait:600,click:editorAdvancedToggle,wait:800,prop:vpnPopup:editorScrollTo=260,wait:1500,shot:$OUT/11-editor-middle.png,prop:vpnPopup:editorScrollTo=620,wait:1500,shot:$OUT/11b-editor-low.png,prop:vpnPopup:editorScrollTo=1100,wait:1500,shot:$OUT/11c-editor-bottom.png,prop:vpnPopup:editorScrollTo=1750,wait:1200,click:editorRemove,wait:400,shot:$OUT/11d-remove-armed.png"
 
+echo "== 7b chosen options"
+run "open,waitScreen:main,mouse:profileEditButton,wait:400,mouse:editorAuth/Password,mouse:editorInterface/Gateway,wait:300,shot:$OUT/10c-editor-chosen.png,mouse:editorSave,wait:600,shot:$OUT/10d-editor-error.png"
+
 echo "== 7c manage section"
 run "open,waitScreen:main,click:profileEditButton,wait:600,click:editorAdvancedToggle,wait:600,prop:vpnPopup:editorScrollTo=1750,wait:1200,click:editorRemove,wait:400,shot:$OUT/13-manage.png"
 
@@ -99,6 +102,13 @@ echo "== 8 password prompt"
 GPVPN_SOCKET="$SOCK" XDG_CONFIG_HOME="$ROOT/config" "$GPVPN" profile set Work authMethod password >/dev/null
 GPVPN_SOCKET="$SOCK" XDG_CONFIG_HOME="$ROOT/config" "$GPVPN" profile set Work active yes >/dev/null
 run "open,waitScreen:main,click:vpnConnectButton,wait:600,shot:$OUT/12-password.png"
+
+echo "== 9 update"
+printf 'older build\n' > "$ROOT/old-gpvpnd"
+rm -f "$ROOT/state/gp-vpn/install.json"
+env_common GPVPN_DAEMON="$ROOT/old-gpvpnd" GPVPN_SOCKET="$SOCK" "$PY" "$MAIN" \
+  --omarchy "$SHELL_DIR" --plugin "$REPO/Panel.qml" --settle 900 --step-delay 300 \
+  --do "open,wait:700,shot:$OUT/14-update.png" >/dev/null
 
 echo "shots in $OUT"
 ls -la "$OUT"

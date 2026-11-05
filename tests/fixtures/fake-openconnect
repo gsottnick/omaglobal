@@ -15,12 +15,33 @@ for arg in "$@"; do
 done
 printf '%s\n' "$ug" >> "$dir/usergroup.log"
 mode=${FAKE_OC_MODE:-ok}
+# Every line below is what openconnect 9.21 really prints, stderr and stdout
+# merged as the daemon reads them. Keep it that way: a line invented here hid
+# a parser that could never see a real tunnel come up.
 if [[ $mode == fail ]]; then
-  echo "authentication failed" >&2
+  echo "Login failed." >&2
+  echo "Failed to complete authentication" >&2
   exit 1
 fi
 if [[ $mode == fail-gateway && $ug == gateway:* ]]; then
-  echo "authentication failed" >&2
+  echo "Login failed." >&2
+  echo "Failed to complete authentication" >&2
+  exit 1
+fi
+if [[ $mode == dns ]]; then
+  echo "getaddrinfo failed for host 'nonexistent.invalid': Name or service not known" >&2
+  echo "Failed to open HTTPS connection to nonexistent.invalid" >&2
+  echo "Failed to complete authentication" >&2
+  exit 1
+fi
+# A portal with several gateways cannot prompt under --non-inter.
+if [[ $mode == need-authgroup && " $* " != *" --authgroup="* ]]; then
+  echo "2 gateway servers available:"
+  echo "  BACKUP-EXAMPLE (backup.example.com) [priority 2]"
+  echo "  PROD-EXAMPLE (vpn.example.com) [priority 1]"
+  echo "GATEWAY: [BACKUP-EXAMPLE|PROD-EXAMPLE]:***" >&2
+  echo "User input required in non-interactive mode" >&2
+  echo "Failed to complete authentication" >&2
   exit 1
 fi
 if [[ $mode == hang ]]; then
@@ -39,11 +60,13 @@ for arg in "$@"; do
     fi
   fi
 done
+echo "Connected to HTTPS on vpn.example.com with ciphersuite (TLS1.3)-(ECDHE-SECP256R1)-(RSA-PSS-RSAE-SHA256)-(AES-256-GCM)"
 echo "2 gateway servers available:"
+echo "  BACKUP-EXAMPLE (backup.example.com) [priority 2]"
 echo "  PROD-EXAMPLE (vpn.example.com) [priority 1]"
-echo "Gateway: PROD-EXAMPLE"
-echo "Session authentication will expire at 2030-01-01T00:00:00"
-echo "Connected as 172.16.8.8, using SSL"
+echo "Gateway says no HIP report submission is needed."
+echo "Configured as 172.16.8.8, with SSL connected and ESP in progress"
+echo "Session authentication will expire at Tue, 01 Jan 2030 00:00:00 UTC"
 if [[ $mode == exit-after ]]; then
   exit 0
 fi

@@ -12,6 +12,8 @@ OmaGlobal is not affiliated with Palo Alto Networks or the GP Connect app.
 
 That's it. The icon turns green when you are connected.
 
+If an update brings a newer background service, the dropdown says so and shows **Update**. It asks for your password once, the same way Install does, and comes straight back.
+
 ## Using more than one VPN
 
 Every portal you add shows up under "Your VPNs". Click one to switch: the old tunnel comes down and the new one comes up. Press **Edit** on any of them to rename it, set a different portal, pick a gateway, or remove it. The active one is the default that auto-connects (if you turn auto-connect on in the widget settings).
@@ -31,6 +33,8 @@ Sign-in is remembered between connections. **Forget saved sign-in** in the edito
 - WebKitGTK can paint a blank sign-in window on Hyprland. OmaGlobal sets `GDK_BACKEND=x11` and `WEBKIT_DISABLE_DMABUF_RENDERER=1` so the window draws. That is a workaround, not a fix in WebKit or Hyprland. See UPSTREAM.md.
 - Some gateways demand a Host Information Policy (HIP) report. OmaGlobal does not send one by default; if your gateway requires it, whoever runs it gives you a check script to put under Advanced options. For safety that script (and any custom routing script) must be installed by an admin: root-owned with safe permissions on the whole path. The HIP script itself runs as your user, never as root.
 - A portal can hand back a cookie for the other interface. The connect retries once with the other interface string, then reports. It does not keep retrying.
+- A portal with several gateways connects to the one it ranks best unless you pick one under **Edit**.
+- Password sign-in cannot answer a one-time-code prompt. A VPN that needs one should use SSO.
 
 ## Optional: the command line
 

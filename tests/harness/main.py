@@ -238,9 +238,138 @@ def push(name):
     client.close()
 
 
+def find_items(plugin, name):
+    """Every item with this objectName, in visual order, across the windows."""
+    from PySide6.QtGui import QGuiApplication
+
+    found = []
+
+    def walk(item):
+        if item.objectName() == name and item not in found:
+            found.append(item)
+        for child in item.childItems():
+            walk(child)
+
+    walk(plugin)
+    for window in QGuiApplication.allWindows():
+        content = window.contentItem() if hasattr(window, "contentItem") else None
+        if content is not None:
+            walk(content)
+    return found
+
+
+def find_labeled(item, label):
+    """The clickable inside `item` whose text starts with `label`."""
+    if str(item.property("text") or "").startswith(label) and item.property("clicked") is None and hasattr(item, "clicked"):
+        return item
+    for child in item.childItems():
+        found = find_labeled(child, label)
+        if found is not None:
+            return found
+    return None
+
+
+def resolve(plugin, target):
+    """objectName, objectName#index for repeats, objectName/Label for a choice."""
+    name, _, label = target.partition("/")
+    name, _, index = name.partition("#")
+    items = find_items(plugin, name)
+    # Every screen stays instantiated, so hidden twins share these names.
+    items = [item for item in items if item.isVisible()] or items
+    if index:
+        items = items[int(index):]
+    if not items:
+        raise SystemExit(f"STEP FAILED: no item named {name}")
+    if not label:
+        return items[0]
+    found = find_labeled(items[0], label)
+    if found is None:
+        raise SystemExit(f"STEP FAILED: {name} has no choice {label}")
+    return found
+
+
+def scroll_into_view(item):
+    """Bring an editor control on screen the way a person would, so the click
+    goes through the real scroll area and whatever covers it."""
+    ancestor = item.parentItem()
+    while ancestor is not None and ancestor.objectName() != "editorAdvanced":
+        ancestor = ancestor.parentItem()
+    if ancestor is None:
+        return
+    from PySide6.QtCore import QPointF
+
+    content = ancestor.property("contentItem")
+    top = item.mapToItem(content, QPointF(0, 0)).y()
+    limit = max(0, ancestor.property("contentHeight") - ancestor.property("height"))
+    ancestor.setProperty("contentY", max(0, min(limit, top - 30)))
+    settle(120)
+
+
+def settle(ms):
+    from PySide6.QtCore import QEventLoop, QTimer
+
+    loop = QEventLoop()
+    QTimer.singleShot(ms, loop.quit)
+    loop.exec()
+
+
+def real_click(plugin, target):
+    """A mouse press and release at the control's position in its window. Nothing
+    is called on the control, so a covered, hidden or dead control fails here."""
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtTest import QTest
+
+    item = resolve(plugin, target)
+    if not item.isVisible():
+        raise SystemExit(f"STEP FAILED: {target} is not visible")
+    scroll_into_view(item)
+    window = item.window()
+    point = item.mapToScene(QPointF(item.width() / 2, item.height() / 2)).toPoint()
+    QTest.mouseMove(window, point)
+    settle(40)
+    QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, point)
+    settle(120)
+
+
+def same(actual, expected):
+    if isinstance(actual, bool):
+        return actual == (expected == "true")
+    return str(actual) == expected
+
+
+def expect(plugin, argument, patience_ms=0):
+    target, _, rest = argument.partition(":")
+    prop, _, wanted = rest.partition("=")
+    waited = 0
+    while True:
+        actual = resolve(plugin, target).property(prop)
+        if same(actual, wanted):
+            return
+        if waited >= patience_ms:
+            raise SystemExit(f"STEP FAILED: {target}.{prop} is {actual!r}, wanted {wanted!r}")
+        settle(100)
+        waited += 100
+
+
 def apply_step(step, plugin, store):
     name, _, argument = step.partition(":")
-    if name == "open":
+    if name == "mouse":
+        real_click(plugin, argument)
+    elif name == "fill":
+        target, _, value = argument.partition("=")
+        resolve(plugin, target).setProperty("text", value)
+    elif name == "expect":
+        expect(plugin, argument)
+    elif name == "await":
+        expect(plugin, argument, 12000)
+    elif name == "screen":
+        waited = 0
+        while store.property("screen") != argument:
+            if waited >= 12000:
+                raise SystemExit(f"STEP FAILED: screen is {store.property('screen')}, wanted {argument}")
+            settle(100)
+            waited += 100
+    elif name == "open":
         plugin.open()
     elif name == "close":
         plugin.close()

@@ -27,10 +27,11 @@ test("status is idle, a second connect is refused, and the cookie is redacted", 
     const first = await waitForDaemon(daemon.sock)
     assert.equal(first.state, "idle")
     const session = await collect(daemon.sock, connect(), {
-      until: (rows) => rows.some((row) => row.state === "connected" && row.ip),
+      // openconnect prints the expiry just after the tunnel comes up.
+      until: (rows) => rows.some((row) => row.state === "connected" && row.expires),
       timeout: 4000,
     })
-    const connected = session.find((row) => row.state === "connected")
+    const connected = session.findLast((row) => row.state === "connected")
     assert.equal(connected.ip, "172.16.8.8")
     assert.ok(connected.gateway)
     assert.ok(connected.expires)

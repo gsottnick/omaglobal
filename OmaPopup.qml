@@ -258,33 +258,37 @@ Column {
       {
         label: "Background service",
         why: "Starts and stops the tunnel from the bar",
-        ready: present["gp-vpn.socket"] === true
+        ready: present["gp-vpn.socket"] === true && present["gpvpnd"] === true
       }
     ]
   }
 
+  // The list saved with the VPN being edited, or the live one when it is connected.
   readonly property var gatewayModel: {
-    var list = []
-    if (activeEntry && activeEntry.gateways && activeEntry.gateways.length)
-      list = activeEntry.gateways
-    if (list.length === 0)
-      list = OmaStore.gateways || []
-    return list
+    var saved = edit.gateways || []
+    if (saved.length === 0 && OmaStore.editorName === OmaStore.activeProfile)
+      return OmaStore.gateways || []
+    return saved
   }
 
   readonly property bool connecting: OmaStore.stepText !== "" && OmaStore.phase !== "connected"
+  readonly property bool passwordVpn: OmaStore.activeAuthMethod === "password"
+  // The daemon only hears about a connect after sign-in, so its "auth" is step 2.
   readonly property int connectStep: {
-    if (OmaStore.phase === "auth")
-      return 1
     if (OmaStore.phase === "connecting")
-      return (OmaStore.gateways || []).length === 0 ? 2 : 3
-    return 0
+      return 3
+    if (OmaStore.phase === "auth")
+      return 2
+    return root.connecting ? 1 : 0
   }
   // Each connecting step explains itself.
   readonly property string stepHint: {
-    if (OmaStore.phase === "auth")
-      return "A sign-in window opens the first time. Keep it open until it finishes."
-    if (OmaStore.phase === "connecting")
+    if (connectStep === 1)
+      return passwordVpn ? "Checking your details with the VPN."
+        : "Finish signing in in the window that opened. If it signs you in by itself, it closes by itself."
+    if (connectStep === 2)
+      return "Signed in. Contacting the VPN."
+    if (connectStep === 3)
       return "The VPN picks the best gateway and brings the tunnel up."
     return ""
   }
@@ -297,10 +301,26 @@ Column {
   onEditorScrollToChanged: editorScroll.contentY = Math.max(0,
     Math.min(editorScroll.contentHeight - editorScroll.height, editorScrollTo))
 
+  // Always replace this object: QML does not see a key changing inside it,
+  // so a control bound to one would keep showing the old value.
   property var edit: ({})
   property bool advancedOpen: false
-  property bool askPassword: false
   property bool removeArmed: false
+
+  function setEdit(changes) {
+    edit = Object.assign({}, edit, changes)
+  }
+
+  readonly property bool canSetDefault: OmaStore.editorName !== "" && !OmaStore.busy
+
+  function submitPassword() {
+    if (passwordField.text === "") {
+      passwordField.forceActiveFocus()
+      return
+    }
+    OmaStore.preparePassword(passwordField.text)
+    passwordField.text = ""
+  }
 
   function beginEdit(name) {
     var entry = null
@@ -314,7 +334,10 @@ Column {
       portal: entry ? String(entry.portal || "") : "",
       username: entry ? String(entry.username || "") : "",
       authMethod: entry ? String(entry.authMethod || "sso") : "sso",
-      interface: entry ? String(entry.interface || "gateway") : "gateway",
+      interface: entry ? String(entry.interface || "portal") : "portal",
+      gateway: entry ? String(entry.gateway || "") : "",
+      gatewayName: entry ? String(entry.gatewayName || "") : "",
+      gateways: entry && entry.gateways ? entry.gateways : [],
       os: entry && entry.os ? String(entry.os) : "",
       useragent: entry && entry.useragent ? String(entry.useragent) : "",
       csdWrapper: entry && entry.csdWrapper ? String(entry.csdWrapper) : "",
@@ -354,7 +377,6 @@ Column {
 
   function saveEdit() {
     OmaStore.saveEditor(edit)
-    edit = {}
   }
 
   // ---- 1. Checking ------------------------------------------------------
@@ -381,13 +403,15 @@ Column {
     spacing: Style.space(10)
 
     StateHero {
-      stateWord: "Set up OmaGlobal"
+      stateWord: OmaStore.updateOnly ? "Update OmaGlobal" : "Set up OmaGlobal"
       title: true
       who: ""
     }
 
     RowCaption {
-      text: "Connect to any GlobalProtect VPN from this bar. One install step needs your password, then connecting is a single click."
+      text: OmaStore.updateOnly
+        ? "This version comes with a newer background service. Updating asks for your password once, then you are back here."
+        : "Connect to any GlobalProtect VPN from this bar. One install step needs your password, then connecting is a single click."
     }
 
     Column {
@@ -417,7 +441,8 @@ Column {
               color: Color.foreground
               font.family: Style.font.family
               font.pixelSize: Style.font.body
-              text: modelData.label + (modelData.ready ? " — ready" : " — will be added")
+              text: modelData.label + (modelData.ready ? " — ready"
+                : (OmaStore.updateOnly ? " — needs an update" : " — will be added"))
             }
             HintCaption { text: modelData.why }
           }
@@ -459,7 +484,7 @@ Column {
     Button {
       objectName: "installSetup"
       width: parent.width
-      text: "Install"
+      text: OmaStore.updateOnly ? "Update" : "Install"
       bordered: true
       verticalPadding: Style.space(8)
       onClicked: OmaStore.installSetup()
@@ -623,22 +648,22 @@ Column {
     spacing: Style.space(10)
 
     StateHero {
-      stateWord: root.askPassword ? "Sign in to " + OmaStore.activeProfile
+      stateWord: OmaStore.askPassword ? "Sign in to " + OmaStore.activeProfile
         : (OmaStore.phase === "connected" ? "Connected"
         : (OmaStore.phase === "failed" ? (OmaStore.rawState === "dropped" ? "Dropped" : "Failed")
         : (root.connecting ? "Connecting" : "Disconnected")))
-      who: root.askPassword ? "" : OmaStore.activeProfile
-      title: root.askPassword
+      who: OmaStore.askPassword ? "" : OmaStore.activeProfile
+      title: OmaStore.askPassword
       connecting: root.connecting
-      connected: OmaStore.phase === "connected" && !root.askPassword
-      failed: OmaStore.phase === "failed" && !root.askPassword
+      connected: OmaStore.phase === "connected" && !OmaStore.askPassword
+      failed: OmaStore.phase === "failed" && !OmaStore.askPassword
       connectStep: root.connectStep
     }
 
     // Password prompt for password profiles, once per attempt.
     Column {
       objectName: "passwordCard"
-      visible: root.askPassword
+      visible: OmaStore.askPassword
       width: parent.width
       spacing: Style.space(6)
 
@@ -658,7 +683,7 @@ Column {
         width: parent.width
         password: true
         placeholderText: "VPN password"
-        onAccepted: { root.askPassword = false; OmaStore.preparePassword(text); text = "" }
+        onAccepted: root.submitPassword()
       }
 
       HintCaption {
@@ -767,7 +792,7 @@ Column {
 
     Text {
       objectName: "errorLine"
-      visible: OmaStore.phase === "failed" && !root.askPassword && OmaStore.message !== ""
+      visible: OmaStore.phase === "failed" && !OmaStore.askPassword && OmaStore.message !== ""
       width: parent.width
       wrapMode: Text.WordWrap
       textFormat: Text.PlainText
@@ -789,14 +814,23 @@ Column {
       onClicked: {
         if (OmaStore.phase === "connected")
           OmaStore.disconnect()
-        else if (root.connecting) {
-          root.askPassword = false
-          OmaStore.disconnect()
-        } else if (OmaStore.activeAuthMethod === "password")
-          root.askPassword = true
+        else if (root.connecting)
+          OmaStore.cancel()
+        else if (OmaStore.askPassword)
+          root.submitPassword()
         else
           OmaStore.connect()
       }
+    }
+
+    Button {
+      objectName: "passwordCancel"
+      width: parent.width
+      visible: OmaStore.askPassword
+      bordered: true
+      verticalPadding: Style.space(8)
+      text: "Cancel"
+      onClicked: OmaStore.cancel()
     }
 
     Button {
@@ -870,6 +904,7 @@ Column {
       anchors.topMargin: Style.space(8)
       width: parent.width
       height: parent.height - editorHeader.implicitHeight - Style.space(8) - Style.space(46)
+        - (editorErrorLine.visible ? editorErrorLine.implicitHeight + Style.space(6) : 0)
       clip: true
       contentHeight: editorBody.implicitHeight
       boundsBehavior: Flickable.StopAtBounds
@@ -942,7 +977,7 @@ Column {
               { label: "SSO (browser)", value: "sso" },
               { label: "Password", value: "password" }
             ]
-            onPicked: function (value) { root.edit.authMethod = value }
+            onPicked: function (value) { root.setEdit({ authMethod: value }) }
           }
           HintCaption {
             text: root.edit.authMethod === "password"
@@ -955,7 +990,7 @@ Column {
             id: editUserField
             objectName: "editorUsername"
             width: parent.width
-            placeholderText: "Usually filled in by signing in"
+            placeholderText: root.edit.authMethod === "password" ? "Needed for password sign-in" : "Usually filled in by signing in"
             onTextChanged: root.edit.username = text
           }
 
@@ -963,12 +998,17 @@ Column {
           ChoiceRow {
             objectName: "editorInterface"
             width: parent.width
-            value: root.edit.interface || "gateway"
+            value: root.edit.interface || "portal"
             options: [
               { label: "Portal (normal)", value: "portal" },
               { label: "Gateway directly", value: "gateway" }
             ]
-            onPicked: function (value) { root.edit.interface = value }
+            onPicked: function (value) { root.setEdit({ interface: value }) }
+          }
+          HintCaption {
+            text: root.edit.interface === "gateway"
+              ? "Skips the portal and signs in to the address above as a gateway. Use this if your VPN provider says so."
+              : "The portal picks the gateway for you. This is right for almost everyone."
           }
 
           RowCaption { text: "Gateway" }
@@ -981,14 +1021,13 @@ Column {
             text: "Automatic — the VPN picks the best one"
             active: (root.edit.gatewayName || "") === "" && (root.edit.gateway || "") === ""
             onClicked: {
-              root.edit.gateway = ""
-              root.edit.gatewayName = ""
-              OmaStore.chooseGateway("", "")
+              root.setEdit({ gateway: "", gatewayName: "" })
             }
           }
           Repeater {
             model: root.gatewayModel
             Button {
+              required property var modelData
               objectName: "gatewayButton"
               width: parent.width
               bordered: true
@@ -997,9 +1036,7 @@ Column {
               text: modelData.name || modelData.host || ""
               active: root.edit.gatewayName === (modelData.name || "")
               onClicked: {
-                root.edit.gatewayName = String(modelData.name || "")
-                root.edit.gateway = String(modelData.host || "")
-                OmaStore.chooseGateway(modelData.name || "", modelData.host || "")
+                root.setEdit({ gatewayName: String(modelData.name || ""), gateway: String(modelData.host || "") })
               }
             }
           }
@@ -1037,7 +1074,7 @@ Column {
               { label: "macOS", value: "mac-intel" },
               { label: "Linux", value: "linux-64" }
             ]
-            onPicked: function (value) { root.edit.os = value }
+            onPicked: function (value) { root.setEdit({ os: value }) }
           }
           HintCaption { text: "Only change this if your VPN provider says it expects a different system." }
 
@@ -1071,7 +1108,7 @@ Column {
             id: editCertPinField
             objectName: "editorServercert"
             width: parent.width
-            placeholderText: "40 hex characters"
+            placeholderText: "pin-sha256:… or 40 hex characters"
             onTextChanged: root.edit.servercert = text
           }
           HintCaption { text: "Connects only when the VPN shows exactly this certificate." }
@@ -1124,7 +1161,7 @@ Column {
             ToggleSwitch {
               objectName: "editorNoDtls"
               checked: root.edit.noDtls === true
-              onToggled: root.edit.noDtls = !root.edit.noDtls
+              onToggled: root.setEdit({ noDtls: root.edit.noDtls !== true })
             }
             HintCaption {
               width: parent.width - Style.space(52)
@@ -1156,16 +1193,20 @@ Column {
           HintCaption { text: "Manages which traffic goes through the VPN. The script must be installed by an admin. Only if you run your own routing rules." }
         }
 
-        PanelSectionHeader { text: "Manage" }
+        PanelSectionHeader {
+          visible: OmaStore.editorName !== ""
+          text: "Manage"
+        }
 
         Button {
           objectName: "editorDefault"
-          visible: OmaStore.editorName !== ""
+          // While a tunnel is up, the selected VPN is the one the card describes.
+          visible: root.canSetDefault
           width: parent.width
           bordered: true
           leftAlign: true
           fontSize: Style.font.bodySmall
-          text: "Set as default"
+          text: OmaStore.editorName === OmaStore.activeProfile ? "This is your default VPN" : "Set as default"
           active: OmaStore.editorName !== "" && OmaStore.editorName === OmaStore.activeProfile
           onClicked: {
             if (OmaStore.editorName !== "")
@@ -1173,8 +1214,8 @@ Column {
           }
         }
         HintCaption {
-          visible: OmaStore.editorName !== ""
-          text: "The default VPN connects at login (with auto-connect on) and keeps the accent color."
+          visible: root.canSetDefault
+          text: "The default VPN is the one selected when the bar starts, and the one auto-connect uses."
         }
 
         Button {
@@ -1184,7 +1225,8 @@ Column {
           bordered: true
           leftAlign: true
           fontSize: Style.font.bodySmall
-          text: "Forget saved sign-in"
+          text: OmaStore.forgotName !== "" && OmaStore.forgotName === OmaStore.editorName
+            ? "Saved sign-in forgotten" : "Forget saved sign-in"
           onClicked: OmaStore.forgetSignIn(OmaStore.editorName)
         }
         HintCaption {
@@ -1235,6 +1277,21 @@ Column {
           }
         }
       }
+    }
+
+    Text {
+      id: editorErrorLine
+      objectName: "editorError"
+      visible: OmaStore.editorError !== ""
+      anchors.bottom: editorFooter.top
+      anchors.bottomMargin: Style.space(6)
+      width: parent.width
+      wrapMode: Text.WordWrap
+      textFormat: Text.PlainText
+      color: Color.urgent
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: OmaStore.editorError
     }
 
     // Pinned actions: always visible regardless of scroll position.

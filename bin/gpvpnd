@@ -25,13 +25,15 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 
 _COOKIE_SHAPED = re.compile(r"[A-Za-z0-9+/=]{40,}")
 _GATEWAY_LINE = re.compile(r"^\s*(.+?)\s+\(([^)]+)\)\s+\[priority\s+(\d+)\]\s*$")
 _GATEWAY_NAME = re.compile(r"^Gateway:\s*(.+?)\s*$")
-_CONNECTED = re.compile(r"Connected as\s+([0-9A-Fa-f:.]+)")
-_EXPIRES = re.compile(r"(?:will expire at|expires)\s+(\S+)")
-_SERVERCERT_RE = re.compile(r"^[0-9A-Fa-f]{40}$")
+# openconnect 9.x says "Configured as <ip>, with SSL connected and ESP ...".
+_CONNECTED = re.compile(r"(?:Configured|Connected) as\s+([0-9A-Fa-f:.]+)")
+_EXPIRES = re.compile(r"Session authentication will expire at\s+(.+?)\s*$")
+_SERVERCERT_RE = re.compile(r"^(?:[0-9A-Fa-f]{40}|sha1:[0-9A-Fa-f]{40}|sha256:[0-9A-Fa-f]{64}|pin-sha256:[A-Za-z0-9+/]{43}=)$")
 
 _OS_VALUES = frozenset({
     "win", "win7", "win8", "win8-1", "win10",
@@ -197,38 +199,57 @@ def map_failure(last_line: str) -> str | None:
     if not last_line:
         return None
     lower = last_line.lower()
+    # A normal progress line during a healthy connect.
+    if "no hip report" in lower or "will expire at" in lower:
+        return None
 
-    # DNS / name resolution
-    dns_patterns = ["resolving", "getaddrinfo", "name or service not known"]
-    for pat in dns_patterns:
+    for pat in ["resolving", "getaddrinfo", "name or service not known"]:
         if pat in lower:
             return "Could not find that VPN address. Check the spelling and try again."
 
-    # Connection / TLS / network
     conn_patterns = [
-        "connection refused", "connection timed out", "ssl", "tls",
-        "network is unreachable", "failed to connect",
+        "connection refused", "connection timed out", "network is unreachable",
+        "failed to connect", "failed to open https", "ssl handshake",
+        "tls handshake", "ssl connection failure",
     ]
     for pat in conn_patterns:
         if pat in lower:
             return "Could not reach the VPN server. Check the network and try again."
 
-    # Auth / login
     auth_patterns = [
-        "failed to authenticate", "authentication", "login failed",
-        "gateway refused", "invalid username or password",
+        "failed to authenticate", "authentication failed", "authentication failure",
+        "authentication required", "login failed", "gateway refused",
+        "invalid username or password",
     ]
     for pat in auth_patterns:
         if pat in lower:
             return "The VPN refused the sign-in. Check your username and password, or ask whoever runs the VPN."
 
-    # HIP / host info
-    hip_patterns = ["hip", "host info", "host information policy", "csd"]
-    for pat in hip_patterns:
+    for pat in ["hip report", "hip check", "host info", "host information policy", "csd"]:
         if pat in lower:
             return "This VPN wants a security check. Ask whoever runs the VPN for the check script (Advanced options)."
 
     return None
+
+
+def explain_failure(lines: list[str]) -> str:
+    """openconnect ends every failure with the same line; the first specific one is the cause."""
+    for line in lines:
+        mapped = map_failure(line)
+        if mapped:
+            return mapped
+    if any(line.strip() for line in lines):
+        return "The VPN refused the connection. Check the portal address and try again."
+    return "Connection failed"
+
+
+def expiry_iso(raw: str) -> str:
+    """openconnect prints the expiry for people; the bar reads ISO."""
+    try:
+        # "Tue, 01 Jan 2030 00:00:00 EST": local time, so the zone name adds nothing.
+        return datetime.strptime(raw.rsplit(" ", 1)[0], "%a, %d %b %Y %H:%M:%S").isoformat()
+    except ValueError:
+        return raw
 
 
 def build_argv(
@@ -307,6 +328,8 @@ def build_argv(
                 args.append("--no-dtls")
             elif key == "reconnectTimeout":
                 args.append(f"--reconnect-timeout={int(value)}")
+            elif key == "authgroup":
+                args.append(f"--authgroup={value}")
 
     args.append(server)
     return args, None
@@ -366,6 +389,10 @@ def _validate_options(
         elif key == "servercert":
             if not isinstance(value, str) or not _SERVERCERT_RE.match(value):
                 return f"Invalid servercert value"
+
+        elif key == "authgroup":
+            if not isinstance(value, str) or not _plain_token(value, 256):
+                return "Invalid gateway name"
 
         elif key == "baseMtu":
             try:
@@ -446,6 +473,7 @@ class Daemon:
         self.gateways: list[dict[str, object]] = []
         self.manual_gateway = ""
         self.last_line = ""
+        self.recent_lines: list[str] = []
         # Traffic stats
         self.rx_bytes = 0
         self.tx_bytes = 0
@@ -644,7 +672,8 @@ class Daemon:
         if not isinstance(options, dict):
             options = None
 
-        password_mode = bool(password) and _plain_token(password)
+        # A password goes to openconnect's stdin, so only a line break can harm it.
+        password_mode = bool(password) and "\n" not in password and "\x00" not in password
 
         # Validate non-password fields
         if not _plain_token(server) or not _plain_token(user):
@@ -711,6 +740,7 @@ class Daemon:
             self.expires = ""
             self.message = ""
             self.gateways = []
+            self.recent_lines = []
             self.last_line = ""
             self.state = "auth"
             self.since = int(time.time())
@@ -806,10 +836,7 @@ class Daemon:
         if current == "connected":
             self._enter("dropped", message="The connection ended unexpectedly. Check your internet connection.")
         else:
-            msg = map_failure(self.last_line)
-            if msg is None:
-                msg = self.last_line or "Connection failed"
-            self._enter("failed", message=msg)
+            self._enter("failed", message=explain_failure(self.recent_lines))
 
     def _on_output(self, line: str) -> None:
         with self.lock:
@@ -817,6 +844,7 @@ class Daemon:
                 return
         redacted = redact(line)
         self.last_line = redacted
+        self.recent_lines = (self.recent_lines + [redacted])[-12:]
         self._broadcast({"type": "log", "line": redacted})
         gateway_line = _GATEWAY_LINE.match(line)
         if gateway_line:
@@ -828,7 +856,8 @@ class Daemon:
             with self.lock:
                 self.gateways.append(entry)
                 if not self.manual_gateway:
-                    self.gateway = str(entry["name"])
+                    # The list prints unsorted; openconnect's first choice is the lowest priority.
+                    self.gateway = str(min(self.gateways, key=lambda item: item["priority"])["name"])
                 current = self.state
                 snap = dict(self.public())
             if current == "connected":
@@ -847,7 +876,7 @@ class Daemon:
         expiry = _EXPIRES.search(line)
         if expiry:
             with self.lock:
-                self.expires = expiry.group(1)
+                self.expires = expiry_iso(expiry.group(1))
                 current = self.state
                 snap = dict(self.public())
             if current == "connected":

@@ -12,7 +12,7 @@ The daemon execs `openconnect` from an argument list. Base flags are fixed: prot
 - **User files** (`--cafile`, `--certificate`, `--sslkey`): the daemon opens the resolved path itself with `O_NOFOLLOW`, checks ownership and permissions with `fstat` on that descriptor, and passes `/dev/fd/<n>` to openconnect through `pass_fds`. A symlink retargeted after validation still points at the already-opened original file, so the check cannot be raced. csd-wrapper is refused entirely when the connecting user's identity or passwd name cannot be resolved (it would otherwise run as root without `--csd-user`).
 - When peer credentials are unavailable (e.g. systemd socket activation), file and script options are refused.
 
-Unknown keys are refused, bad values are refused, and nothing is ever a shell string. The cookie or password is written to openconnect's stdin; `/proc/<pid>/cmdline` never sees it.
+The gateway pick travels as `--authgroup`, a plain value the daemon validates like the others. Unknown keys are refused, bad values are refused, and nothing is ever a shell string. The cookie or password is written to openconnect's stdin; `/proc/<pid>/cmdline` never sees it.
 
 Password sign-in puts the password in the same channel as the cookie: the widget writes it to the helper's stdin, the helper to the socket, the daemon to openconnect's stdin. It is not stored anywhere.
 
@@ -22,7 +22,7 @@ The helper spawns the login tool from an argument list. It does not build a shel
 
 ## What setup does
 
-`tools/setup.sh` is the only privileged step. The dropdown's Install button opens your terminal and runs that script; you approve the password there. The widget and the helper do not call sudo or pkexec. The script installs packages, a pinned gp-saml-gui checkout, and the systemd unit, writing progress to `~/.local/state/gp-vpn/install.json` (plain status text, no secrets). Review it before you run it.
+`tools/setup.sh` is the only privileged step. It also installs daemon updates: the bar compares `/usr/local/bin/gpvpnd` with the copy in the plugin and offers Update when they differ, so a plugin update never runs against an older root daemon by accident. The dropdown's Install button opens your terminal and runs that script; you approve the password there. The widget and the helper do not call sudo or pkexec. The script installs packages, a pinned gp-saml-gui checkout, and the systemd unit, writing progress to `~/.local/state/gp-vpn/install.json` (plain status text, no secrets). Review it before you run it.
 
 ## What this does not protect
 

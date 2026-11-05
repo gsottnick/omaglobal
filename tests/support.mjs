@@ -12,13 +12,24 @@ export const gpvpnd = path.join(repo, "bin", "gpvpnd")
 export const fakeOpenconnect = path.join(repo, "tests", "fixtures", "fake-openconnect")
 export const COOKIE = "AAAAfakeCookieValue0123456789abcdef====="
 
-export const SAML_OK = `SAML response converted to OpenConnect command line invocation:
+// gp-saml-gui's real stderr at the pinned commit (see its print() calls). The
+// second heading matters: it once parsed as the server, "to".
+const samlOutput = (usergroup) => `Looking for SAML auth tags in response to https://vpn.example.com/ssl-vpn/prelogin.esp...
+Got SAML POST, opening browser...
+
+SAML response converted to OpenConnect command line invocation:
 
     echo ${COOKIE} |
-        sudo openconnect --protocol=gp --user=user@example.com --os=linux --usergroup=gateway:prelogin-cookie --passwd-on-stdin vpn.example.com
+        sudo openconnect --protocol=gp '--useragent=PAN GlobalProtect' --user=user@example.com --os=linux-64 --usergroup=${usergroup} --passwd-on-stdin vpn.example.com
 
 SAML response converted to test-globalprotect-login.py invocation:
+
+    test-globalprotect-login.py --user=user@example.com --clientos=Linux -p '' \\
+         https://vpn.example.com/ssl-vpn/login.esp prelogin-cookie=${COOKIE}
+
 `
+export const SAML_OK = samlOutput("gateway:prelogin-cookie")
+export const SAML_PORTAL = samlOutput("portal:prelogin-cookie")
 
 export async function tempHome() {
   const dir = await mkdtemp(path.join(tmpdir(), "omaglobal-"))

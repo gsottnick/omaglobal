@@ -53,7 +53,10 @@ sudo install -m 0755 "${ROOT}/bin/gpvpnd" /usr/local/bin/gpvpnd
 sudo install -m 0644 "${ROOT}/tools/gp-vpn.service" /etc/systemd/system/gp-vpn.service
 sudo install -m 0644 "${ROOT}/tools/gp-vpn.socket" /etc/systemd/system/gp-vpn.socket
 sudo systemctl daemon-reload
-sudo systemctl enable --now gp-vpn.socket
+sudo systemctl enable gp-vpn.socket
+# A running daemon keeps the old build in memory. Start this one.
+sudo systemctl stop gp-vpn.service
+sudo systemctl restart gp-vpn.socket
 atomic_status '{"status":"running","step":"service","detail":"Service is installed and enabled."}'
 
 # Step 4: verify

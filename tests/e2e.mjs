@@ -29,6 +29,9 @@ try {
   assert.equal(state.state, "connected")
   assert.equal(state.ip, "172.16.8.8")
   assert.equal(state.gateway, "PROD-EXAMPLE")
+  // openconnect prints the expiry just after the tunnel comes up.
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  state.expires = JSON.parse((await run(gpvpn, ["status"], home.env)).stdout).expires
   assert.equal(state.expires, "2030-01-01T00:00:00")
   const argv = await readText(path.join(daemon.ocDir, "argv"))
   const stdin = (await readText(path.join(daemon.ocDir, "stdin"))).trim()

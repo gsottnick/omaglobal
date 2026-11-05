@@ -26,8 +26,8 @@ test("the setup card matches the setup script usage line", async () => {
   assert.match(setup, /gobject-introspection/)
   assert.match(setup, /wl-clipboard/)
   assert.match(popup, /objectName: "gatewayButton"/)
-  assert.match(popup, /OmaStore\.chooseGateway/)
-  assert.match(store, /function chooseGateway/)
+  // Re-running setup is how a plugin update reaches the daemon, so it must restart it.
+  assert.match(setup, /systemctl stop gp-vpn\.service/)
 })
 
 test("every command the README tells the user to run exists", async () => {

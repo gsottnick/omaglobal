@@ -254,3 +254,15 @@ test("setup.sh -h prints usage line", async () => {
   assert.equal(result.stdout.trim(), "tools/setup.sh")
   console.log("help flag done")
 })
+
+test("an older installed daemon makes the bar ask for an update", async () => {
+  const { env } = await tempHome()
+  env.GPVPN_DAEMON = path.join(env.HOME, "gpvpnd")
+  await writeFile(env.GPVPN_DAEMON, "older build\n")
+  const stale = JSON.parse((await run(gpvpn, ["deps"], env)).stdout)
+  assert.equal(stale.items.find((item) => item.name === "gpvpnd").present, false)
+  assert.equal(stale.ready, false)
+  await writeFile(env.GPVPN_DAEMON, await readFile(path.join(repo, "bin/gpvpnd")))
+  const current = JSON.parse((await run(gpvpn, ["deps"], env)).stdout)
+  assert.equal(current.items.find((item) => item.name === "gpvpnd").present, true)
+})

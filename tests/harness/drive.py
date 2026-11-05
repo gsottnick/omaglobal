@@ -95,6 +95,7 @@ def xdg_env(socket_path: str, root: str | None = None) -> dict[str, str]:
         env[key] = path
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["GPVPN_SOCKET"] = socket_path
+    env.setdefault("GPVPN_DAEMON", str(REPO / "bin" / "gpvpnd"))
     return env
 
 
@@ -277,10 +278,10 @@ def scenario_connect(shell: Path, plugin: Path | None = None) -> None:
             raise SystemExit(f"empty connect did not ask for a portal {empty['phase']} {empty['statusLine']!r}")
         if "gpvpn" in empty_text or "setup.sh" in empty_text or connect_spawns(empty) != 0:
             raise SystemExit(f"empty connect ran a command {empty_text!r} spawns={connect_spawns(empty)}")
-        adds = [command for command in shown["executed"] if len(command) >= 2 and command[1] == "profile" and "add" in command]
+        adds = [command for command in shown["executed"] if len(command) >= 3 and command[1:3] == ["profile", "save"]]
         if len(adds) != 1 or Path(adds[0][0]).resolve() != helper.resolve():
             raise SystemExit(f"profile was not saved by the helper {adds}")
-        if "vpn.example.com" not in adds[0] or "user@example.com" not in adds[0]:
+        if "vpn.example.com" not in adds[0][-1] or "user@example.com" not in adds[0][-1]:
             raise SystemExit(f"saved command missed the typed values {adds[0]}")
         if connect_spawns(shown) != 1:
             raise SystemExit(f"connect after save spawned {connect_spawns(shown)}")
@@ -358,6 +359,285 @@ def scenario_profile(shell: Path) -> None:
     print("PROFILE loaded=Other saved=Default")
 
 
+FAKE_SAML = """import os, sys, time
+if os.environ.get("FAKE_SAML_HOLD"):
+    open(os.environ["FAKE_SAML_HOLD"], "w").write(str(os.getpid()))
+    time.sleep(60)
+sys.stderr.write(\"\"\"Looking for SAML auth tags in response to https://vpn.example.com/ssl-vpn/prelogin.esp...
+Got SAML POST, opening browser...
+
+SAML response converted to OpenConnect command line invocation:
+
+    echo AAAAfakeCookieValue0123456789abcdef===== |
+        sudo openconnect --protocol=gp '--useragent=PAN GlobalProtect' --user=user@example.com --os=linux-64 --usergroup=portal:prelogin-cookie --passwd-on-stdin vpn.example.com
+
+SAML response converted to test-globalprotect-login.py invocation:
+
+    test-globalprotect-login.py --user=user@example.com --clientos=Linux -p '' \\\\
+         https://vpn.example.com/global-protect/getconfig.esp prelogin-cookie=AAAAfakeCookieValue0123456789abcdef=====
+
+\"\"\")
+"""
+
+
+def ready_env(root: str, sock: str) -> dict[str, str]:
+    """A machine where setup already ran: the helper reports ready, the sign-in
+    tool is a stand-in that prints gp-saml-gui's real output."""
+    env = xdg_env(sock, root)
+    bin_dir = Path(root) / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    fake_git = bin_dir / "git"
+    fake_git.write_text('#!/usr/bin/env bash\necho 21cce40334791a533c7a263fe367f0ddc072d8fb\n')
+    fake_git.chmod(0o755)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["GPVPN_DAEMON"] = str(REPO / "bin" / "gpvpnd")
+    saml = Path(env["XDG_DATA_HOME"]) / "gp-vpn" / "gp-saml-gui" / "gp_saml_gui.py"
+    saml.parent.mkdir(parents=True, exist_ok=True)
+    saml.write_text(FAKE_SAML)
+    return env
+
+
+def real_daemon(root: str, sock: str, env: dict[str, str]) -> subprocess.Popen[bytes]:
+    """The real gpvpnd as this user, with openconnect replaced by the fixture."""
+    run_env = {**env, "FAKE_OC_DIR": os.path.join(root, "oc")}
+    proc = subprocess.Popen(
+        [sys.executable, str(REPO / "bin" / "gpvpnd"), "--socket", sock,
+         "--openconnect", str(REPO / "tests" / "fixtures" / "fake-openconnect"),
+         "--state-file", os.path.join(root, "daemon.json")],
+        env=run_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    for _ in range(100):
+        if os.path.exists(sock):
+            return proc
+        time.sleep(0.05)
+    proc.terminate()
+    raise SystemExit("daemon did not start")
+
+
+def seed(env: dict[str, str], *rows: list[str]) -> None:
+    helper = [sys.executable, str(REPO / "bin" / "gpvpn")]
+    for args in rows:
+        done = subprocess.run(helper + args, env=env, text=True, capture_output=True, check=False)
+        if done.returncode != 0:
+            raise SystemExit(done.stderr)
+
+
+def steps_ok(proc: subprocess.CompletedProcess[str], where: str) -> None:
+    if proc.returncode != 0 or "STEP FAILED" in proc.stdout + proc.stderr:
+        raise SystemExit(f"{where}\n{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}")
+
+
+def saved_store(env: dict[str, str]) -> dict:
+    return json.loads((Path(env["XDG_CONFIG_HOME"]) / "gp-vpn" / "profiles.json").read_text(encoding="utf-8"))
+
+
+ADD = ["profile", "add", "--name", "Work", "--portal", "vpn.example.com"]
+ADD2 = ["profile", "add", "--name", "Home", "--portal", "vpn.example.net"]
+
+
+def scenario_editor_controls(shell: Path) -> None:
+    """Every editor control, with real mouse clicks. Each one must visibly change
+    the moment it is clicked, and Save must store what the screen showed."""
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    sock = os.path.join(root, "run", "ctrl.sock")
+    env = ready_env(root, sock)
+    seed(env, ADD, ADD2)
+    fake = start_fake(sock)
+    try:
+        steps = ",".join([
+            "open", "screen:main", "mouse:profileEditButton#1", "screen:editor",
+            # Nothing is touched yet: portal sign-in is the normal path.
+            "expect:editorAuth/SSO:active=true", "expect:editorInterface/Portal:active=true",
+            "expect:editorInterface/Gateway:active=false",
+            "mouse:editorAuth/Password", "expect:editorAuth/Password:active=true",
+            "expect:editorAuth/SSO:active=false",
+            "mouse:editorAuth/SSO", "expect:editorAuth/SSO:active=true",
+            "mouse:editorAuth/Password", "expect:editorAuth/Password:active=true",
+            "mouse:editorInterface/Gateway", "expect:editorInterface/Gateway:active=true",
+            "expect:editorInterface/Portal:active=false",
+            "mouse:editorInterface/Portal", "expect:editorInterface/Portal:active=true",
+            "mouse:editorInterface/Gateway", "expect:editorInterface/Gateway:active=true",
+            "mouse:editorAdvancedToggle",
+            "expect:editorOs/Auto:active=true", "mouse:editorOs/Windows",
+            "expect:editorOs/Windows:active=true", "expect:editorOs/Auto:active=false",
+            "expect:editorNoDtls:checked=false", "mouse:editorNoDtls", "expect:editorNoDtls:checked=true",
+            "mouse:editorNoDtls", "expect:editorNoDtls:checked=false", "mouse:editorNoDtls",
+            # A problem keeps the editor open and says why.
+            "mouse:editorSave", "await:editorError:text=Password sign-in needs a username.",
+            "expect:editorError:visible=true",
+            "fill:editorUsername=user@example.com", "fill:editorBaseMtu=abc", "mouse:editorSave",
+            "await:editorError:text=Tunnel packet size must be a number from 576 to 65535.",
+            "fill:editorBaseMtu=1300", "fill:editorPortal=", "mouse:editorSave",
+            "await:editorError:text=Enter the VPN portal address.",
+            "fill:editorPortal=https://vpn.example.org/global-protect/", "fill:editorName=Renamed",
+            "mouse:editorSave", "screen:main",
+            # The saved values come back, on the VPN that was edited.
+            "wait:300", "mouse:profileEditButton#1", "screen:editor",
+            "expect:editorAuth/Password:active=true", "expect:editorInterface/Gateway:active=true",
+            "expect:editorName:text=Renamed", "mouse:editorAdvancedToggle",
+            "expect:editorOs/Windows:active=true", "expect:editorNoDtls:checked=true",
+            "expect:editorBaseMtu:text=1300",
+            # Blanks clear a setting.
+            "fill:editorBaseMtu=", "mouse:editorSave", "screen:main",
+        ])
+        proc = run_main(shell, BASE_SETTINGS, steps, sock, None, False, env)
+        steps_ok(proc, "editor controls")
+    finally:
+        stop_fake(fake)
+    store = saved_store(env)
+    edited = next((row for row in store["profiles"] if row["name"] == "Renamed"), None)
+    if edited is None or len(store["profiles"]) != 2:
+        raise SystemExit(f"editor saved the wrong VPN {store}")
+    wanted = {"portal": "vpn.example.org", "authMethod": "password", "interface": "gateway",
+              "os": "win", "noDtls": True, "username": "user@example.com"}
+    for key, value in wanted.items():
+        if edited.get(key) != value:
+            raise SystemExit(f"editor saved {key}={edited.get(key)!r}")
+    if "baseMtu" in edited:
+        raise SystemExit("a blank MTU did not clear the setting")
+    if store["active"] != "Work":
+        raise SystemExit(f"saving moved the default to {store['active']}")
+    print("CONTROLS every editor control answers a real click")
+
+
+def scenario_manage(shell: Path) -> None:
+    """Set as default, Forget, Remove, Keep it, Add a VPN, Back, gateway pick."""
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    sock = os.path.join(root, "run", "ctrl.sock")
+    env = ready_env(root, sock)
+    seed(env, ADD, ADD2, ["profile", "set", "Home", "gateways",
+                          json.dumps([{"name": "EAST", "host": "east.example.net", "priority": 1},
+                                      {"name": "WEST", "host": "west.example.net", "priority": 2}])])
+    fake = start_fake(sock)
+    try:
+        steps = ",".join([
+            "open", "screen:main", "mouse:profileEditButton#1", "screen:editor",
+            "expect:gatewayAuto:active=true", "mouse:gatewayButton#1",
+            "expect:gatewayButton#1:active=true", "expect:gatewayAuto:active=false",
+            "mouse:gatewayAuto", "expect:gatewayAuto:active=true",
+            "mouse:gatewayButton#1", "mouse:editorSave", "screen:main",
+            "wait:300", "mouse:profileEditButton#1", "screen:editor",
+            "expect:gatewayButton#1:active=true",
+            "expect:editorDefault:text=Set as default", "mouse:editorDefault",
+            "await:editorDefault:text=This is your default VPN",
+            "expect:editorForget:text=Forget saved sign-in", "mouse:editorForget",
+            "await:editorForget:text=Saved sign-in forgotten",
+            "mouse:editorRemove", "expect:removeConfirm:visible=true",
+            "mouse:removeNo", "expect:removeConfirm:visible=false",
+            "mouse:editorBack", "screen:main",
+            "mouse:addVpn", "screen:editor", "expect:editorDefault:visible=false",
+            "expect:editorInterface/Portal:active=true",
+            "fill:editorPortal=vpn.example.edu", "mouse:editorSave", "screen:main",
+            "wait:300", "mouse:profileEditButton#2", "screen:editor",
+            "mouse:editorRemove", "mouse:removeYes", "screen:main",
+        ])
+        proc = run_main(shell, BASE_SETTINGS, steps, sock, None, False, env)
+        steps_ok(proc, "manage")
+    finally:
+        stop_fake(fake)
+    store = saved_store(env)
+    names = [row["name"] for row in store["profiles"]]
+    if names != ["Work", "Home"] or store["active"] != "Work":
+        raise SystemExit(f"manage left {names} active={store['active']}")
+    home = store["profiles"][1]
+    if home["gatewayName"] != "WEST" or home["gateway"] != "west.example.net":
+        raise SystemExit(f"gateway pick not saved {home}")
+    print("MANAGE default, forget, remove, add and gateway answer a real click")
+
+
+def scenario_real_connect(shell: Path) -> None:
+    """Welcome to Connected through the real helper and the real daemon. Only
+    openconnect and the sign-in window are stand-ins, printing their real text."""
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    sock = os.path.join(root, "run", "ctrl.sock")
+    env = ready_env(root, sock)
+    daemon = real_daemon(root, sock, env)
+    try:
+        steps = ",".join([
+            "open", "screen:welcome", "fill:portalField=vpn.example.com", "mouse:connectButton",
+            "screen:main", "await:heroState:text=Connected",
+            "expect:vpnIp:text=Address  172.16.8.8", "expect:vpnGateway:text=Gateway  PROD-EXAMPLE",
+            "mouse:reconnectButton", "wait:300", "await:heroState:text=Connected",
+            "mouse:vpnConnectButton", "await:heroState:text=Disconnected",
+        ])
+        proc = run_main(shell, {**BASE_SETTINGS, "autoConnect": False}, steps, sock, None, False, env)
+        steps_ok(proc, "real connect")
+    finally:
+        daemon.terminate()
+        daemon.wait(timeout=5)
+    argv = Path(root, "oc", "argv").read_text(encoding="utf-8").split("\n")
+    if "vpn.example.com" not in argv or "--usergroup" not in argv:
+        raise SystemExit(f"openconnect got {argv}")
+    print("REALCONNECT welcome to connected to disconnected")
+
+
+def scenario_cancel(shell: Path) -> None:
+    """Cancel closes the sign-in window, and a password VPN asks every time."""
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    sock = os.path.join(root, "run", "ctrl.sock")
+    env = ready_env(root, sock)
+    hold = os.path.join(root, "saml.pid")
+    env["FAKE_SAML_HOLD"] = hold
+    seed(env, ADD)
+    daemon = real_daemon(root, sock, env)
+    try:
+        steps = ",".join([
+            "open", "screen:main", "mouse:vpnConnectButton", "await:heroState:text=Connecting",
+            "wait:900", "mouse:vpnConnectButton", "await:heroState:text=Disconnected", "wait:500",
+        ])
+        proc = run_main(shell, BASE_SETTINGS, steps, sock, None, False, env)
+        steps_ok(proc, "cancel")
+        pid = int(Path(hold).read_text(encoding="utf-8"))
+        if os.path.exists(f"/proc/{pid}") and "Z" not in Path(f"/proc/{pid}/stat").read_text().split()[2]:
+            os.kill(pid, 9)
+            raise SystemExit("Cancel left the sign-in window open")
+
+        env.pop("FAKE_SAML_HOLD")
+        seed(env, ["profile", "set", "Work", "username", "user@example.com"],
+             ["profile", "set", "Work", "authMethod", "password"])
+        steps = ",".join([
+            "open", "screen:main", "mouse:vpnConnectButton", "expect:passwordCard:visible=true",
+            "mouse:passwordCancel", "expect:passwordCard:visible=false",
+            "mouse:vpnConnectButton", "expect:passwordCard:visible=true",
+            # The button under the field must work, not just Enter.
+            "mouse:vpnConnectButton", "expect:passwordCard:visible=true",
+            "fill:passwordField=-first try", "mouse:vpnConnectButton",
+            "await:heroState:text=Connected",
+            "mouse:reconnectButton", "await:passwordCard:visible=true",
+            "fill:passwordField=second", "mouse:vpnConnectButton", "await:heroState:text=Connected",
+            "mouse:vpnConnectButton", "await:heroState:text=Disconnected",
+        ])
+        proc = run_main(shell, BASE_SETTINGS, steps, sock, None, False, env)
+        steps_ok(proc, "password")
+    finally:
+        daemon.terminate()
+        daemon.wait(timeout=5)
+    log = Path(root, "oc", "stdin").read_text(encoding="utf-8")
+    if log.strip() != "second":
+        raise SystemExit(f"second password was not delivered {log!r}")
+    print("CANCEL sign-in window closes; password asks every attempt")
+
+
+def scenario_update(shell: Path) -> None:
+    """A plugin update with an older daemon offers Update, not a broken connect."""
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    sock = os.path.join(root, "run", "ctrl.sock")
+    env = ready_env(root, sock)
+    old = Path(root, "old-gpvpnd")
+    old.write_text("older build\n")
+    env["GPVPN_DAEMON"] = str(old)
+    seed(env, ADD)
+    fake = start_fake(sock)
+    try:
+        steps = ",".join(["open", "screen:setup", "expect:installSetup:text=Update",
+                          "mouse:setupDetailsToggle", "expect:setupDetailsToggle:text=Hide details"])
+        proc = run_main(shell, BASE_SETTINGS, steps, sock, None, False, env)
+        steps_ok(proc, "update")
+    finally:
+        stop_fake(fake)
+    print("UPDATE an older daemon offers Update")
+
+
 def scenario_negative(shell: Path) -> None:
     copy = Path(tempfile.mkdtemp(prefix="omaglobal-dimmed-"))
     for name in ("Panel.qml", "OmaStore.qml", "OmaPopup.qml", "qmldir"):
@@ -401,6 +681,11 @@ def main() -> int:
     scenario_auto(shell, True)
     scenario_auto(shell, False)
     scenario_profile(shell)
+    scenario_editor_controls(shell)
+    scenario_manage(shell)
+    scenario_real_connect(shell)
+    scenario_cancel(shell)
+    scenario_update(shell)
     scenario_negative(shell)
     print("CLEAN")
     return 0
