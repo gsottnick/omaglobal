@@ -49,88 +49,19 @@ Column {
     property string stateWord: "Disconnected"
     property string who: ""
     property bool connecting: false
-    property bool connected: false
-    property bool failed: false
     property int connectStep: 0 // 1 sign-in, 2 gateway, 3 tunnel
     // A screen title (setup, welcome, sign-in prompt), not a VPN state: never dimmed.
     property bool title: false
 
-    // One shield glyph (the font has exactly one); state is carried by
-    // color and weight of the dimming instead of a separate outline cut.
-    readonly property string iconGlyph: "\u{f132}"
-    // "Connected/ok" is the shell's bar-active color, not the accent (the
-    // accent is red in some themes, which reads as an error).
-    readonly property color okColor: Color.bar.active
-    readonly property color iconColor: connected ? okColor
-      : (failed ? Color.urgent : (connecting || title ? Color.accent : Color.foreground))
-    readonly property real iconOpacity: connected || connecting || title ? 1.0
-      : (failed ? 0.9 : 0.4)
-
+    // Room around the shield, so the arrival ring is not cut off.
     Item {
-      id: visual
-      width: Style.space(72)
-      height: Style.space(72)
-      anchors.horizontalCenter: parent.horizontalCenter
-      opacity: hero.failed ? 0.75 : 1
-      Behavior on opacity {
-        NumberAnimation { duration: Style.duration(300) }
-      }
-
-      Text {
+      width: parent.width
+      height: heroShield.height + Style.space(22)
+      ShieldMark {
+        id: heroShield
+        objectName: "heroShield"
         anchors.centerIn: parent
-        text: hero.iconGlyph
-        textFormat: Text.PlainText
-        font.family: Style.font.family
-        font.pixelSize: Style.font.display * 1.6
-        renderType: Text.NativeRendering
-        color: hero.iconColor
-        opacity: hero.iconOpacity
-      }
-
-      // Connected: one soft ring expanding out of the shield.
-      Rectangle {
-        anchors.centerIn: parent
-        width: Style.space(64)
-        height: width
-        radius: width / 2
-        color: "transparent"
-        border.color: hero.okColor
-        border.width: 2
-        opacity: connected && progress < 1 ? 0.6 * (1 - progress) : 0
-        scale: 0.6 + 0.9 * progress
-        property real progress: 1
-        NumberAnimation on progress {
-          from: 0
-          to: 1
-          duration: Style.duration(650)
-          running: hero.connected && !Style.reduceMotion
-        }
-      }
-
-      // Connecting: three dots orbiting the shield.
-      Repeater {
-        model: hero.connecting && !Style.reduceMotion ? 3 : 0
-        Rectangle {
-          required property int index
-          width: Style.space(8)
-          height: Style.space(8)
-          radius: width / 2
-          color: Color.accent
-          x: parent.width / 2 - width / 2
-          y: Style.space(2)
-          transform: Rotation {
-            origin.x: parent.width / 2 - x
-            origin.y: parent.height / 2 - y
-            angle: index * 120
-          }
-          RotationAnimation on rotation {
-            running: hero.connecting && !Style.reduceMotion
-            loops: Animation.Infinite
-            from: 0
-            to: 360
-            duration: 1600
-          }
-        }
+        size: Style.space(58)
       }
     }
 
@@ -140,11 +71,18 @@ Column {
       width: parent.width
       horizontalAlignment: Text.AlignHCenter
       textFormat: Text.PlainText
-      color: hero.title ? Color.foreground : hero.iconColor
-      opacity: hero.connected || hero.failed || hero.connecting || hero.title ? 1 : 0.4
+      color: hero.title ? Color.foreground : ShieldMotion.tint
       font.family: Style.font.family
       font.pixelSize: Style.font.body
       text: hero.stateWord
+      // The word changes while it is out of sight, in step with the shield.
+      Behavior on text {
+        SequentialAnimation {
+          NumberAnimation { target: stateLine; property: "opacity"; to: 0; duration: Style.duration(110) }
+          PropertyAction { target: stateLine; property: "text" }
+          NumberAnimation { target: stateLine; property: "opacity"; to: 1; duration: Style.duration(170) }
+        }
+      }
     }
 
     Text {
@@ -166,7 +104,7 @@ Column {
       horizontalAlignment: Text.AlignHCenter
       visible: hero.connecting && hero.connectStep > 0
       textFormat: Text.PlainText
-      color: Color.accent
+      color: ShieldMotion.tint
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       text: "Step " + hero.connectStep + " of 3 — "
@@ -524,7 +462,6 @@ Column {
 
     StateHero {
       stateWord: "Install did not finish"
-      failed: true
       who: ""
     }
 
@@ -649,14 +586,13 @@ Column {
 
     StateHero {
       stateWord: OmaStore.askPassword ? "Sign in to " + OmaStore.activeProfile
+        : (root.connecting ? "Connecting"
         : (OmaStore.phase === "connected" ? "Connected"
         : (OmaStore.phase === "failed" ? (OmaStore.rawState === "dropped" ? "Dropped" : "Failed")
-        : (root.connecting ? "Connecting" : "Disconnected")))
+        : "Disconnected")))
       who: OmaStore.askPassword ? "" : OmaStore.activeProfile
       title: OmaStore.askPassword
       connecting: root.connecting
-      connected: OmaStore.phase === "connected" && !OmaStore.askPassword
-      failed: OmaStore.phase === "failed" && !OmaStore.askPassword
       connectStep: root.connectStep
     }
 
@@ -792,7 +728,7 @@ Column {
 
     Text {
       objectName: "errorLine"
-      visible: OmaStore.phase === "failed" && !OmaStore.askPassword && OmaStore.message !== ""
+      visible: OmaStore.phase === "failed" && !OmaStore.askPassword && !root.connecting && OmaStore.message !== ""
       width: parent.width
       wrapMode: Text.WordWrap
       textFormat: Text.PlainText

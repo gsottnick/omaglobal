@@ -56,13 +56,16 @@ test("the panel keeps the theme rules that both shells enforce", async () => {
   const head = panel.slice(0, panel.indexOf("BarIconButton"))
   assert.doesNotMatch(head, /\bdimmed\s*:/)
   assert.match(panel, /dimmed:\s*root\.iconDimmed/)
-  assert.match(panel, /Color\.urgent/)
-  assert.doesNotMatch(panel + popup + store, /Color\.error/)
-  assert.doesNotMatch(panel + popup + store, /#[0-9A-Fa-f]{3,8}\b/)
+  const motion = await read("ShieldMotion.qml")
+  const mark = await read("ShieldMark.qml")
+  assert.match(motion, /Color\.urgent/)
+  assert.doesNotMatch(panel + popup + store + motion + mark, /Color\.error/)
+  assert.doesNotMatch(panel + popup + store + motion + mark, /#[0-9A-Fa-f]{3,8}\b/)
+  // Motion runs on the display's clock and honors the reduced-motion setting.
+  assert.doesNotMatch(panel + popup + motion + mark, /\bTimer\b/)
+  assert.match(motion, /!Style\.reduceMotion/)
   assert.match(panel, /advanceWidth/)
   assert.doesNotMatch(panel + popup, /horizontalAdvance/)
-  assert.equal((panel.match(/\bTimer\b/g) || []).length, 1)
-  assert.equal((popup.match(/\bTimer\b/g) || []).length, 0)
   assert.equal((store.match(/\bTimer\b/g) || []).length, 2)
   assert.match(store, /id:\s*retryTimer/)
   assert.match(store, /id:\s*clockTimer/)
@@ -73,4 +76,22 @@ test("the panel keeps the theme rules that both shells enforce", async () => {
   assert.match(panel, /Component\.onCompleted:\s*applySettings/)
   assert.match(panel, /onSettingsChanged:\s*applySettings/)
   assert.match(popup, /textFormat:\s*Text\.PlainText/)
+})
+
+test("shield colors come from what a theme color is, not its slot", async () => {
+  const source = (await read("shieldColors.js")).replace(".pragma library", "")
+  const colors = new Function(`${source}; return { pick, palette }`)()
+  const signals = (text) => {
+    const palette = colors.palette(text)
+    return [colors.pick(palette, 140, 50, "ok"), colors.pick(palette, 38, 26, "busy"), colors.pick(palette, 0, 25, "fail")]
+  }
+  // Scrambled slots: color1 is lime, color2 is red.
+  const scrambled = `accent = "#BE3F50"\nforeground = "#14B9B5"\ncolor1 = "#c8e967"\ncolor2 = "#E20342"\ncolor3 = "#7cd699"\ncolor6 = "#FF7F41"\ncolor10 = "#f93d3b"\ncolor14 = "#ffbe74"\n`
+  assert.deepEqual(signals(scrambled), ["#7cd699", "#ffbe74", "#f93d3b"])
+  // A conventional palette.
+  const plain = `color1 = "#f38ba8"\ncolor2 = "#a6e3a1"\ncolor3 = "#f9e2af"\ncolor4 = "#89b4fa"\n`
+  assert.deepEqual(signals(plain), ["#a6e3a1", "#f9e2af", "#f38ba8"])
+  // A monochrome theme has none, so the theme's own roles stand in.
+  const mono = `color1 = "#888888"\ncolor2 = "#aaaaaa"\naccent = "#cccccc"\n`
+  assert.deepEqual(signals(mono), ["ok", "busy", "fail"])
 })

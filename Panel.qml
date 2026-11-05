@@ -15,8 +15,6 @@ Panel {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  readonly property color toneAmber: Qt.hsla(0.11, 0.75, 0.52, 1)
-  readonly property color toneGreen: Qt.hsla(0.36, 0.62, 0.42, 1)
   readonly property string phase: OmaStore.phase
   readonly property string iconRole: {
     if (OmaStore.phase === "connected")
@@ -26,15 +24,6 @@ Panel {
     if (OmaStore.phase === "failed")
       return "urgent"
     return "dim"
-  }
-  readonly property color iconColor: {
-    if (iconRole === "green")
-      return toneGreen
-    if (iconRole === "amber")
-      return toneAmber
-    if (iconRole === "urgent")
-      return Color.urgent
-    return barForeground
   }
   readonly property bool iconDimmed: OmaStore.phase === "off"
   readonly property bool setupVisible: !OmaStore.socketUp
@@ -53,12 +42,6 @@ Panel {
   readonly property string vpnGateway: OmaStore.gateway
   readonly property string vpnExpires: OmaStore.expires
   readonly property string activeProfile: OmaStore.activeProfile
-  property bool pulseOn: true
-  property real iconAngle: 0
-  property int pulseTick: 0
-  // The bar icon spins while the tunnel is being negotiated and pulses
-  // during sign-in. One timer for both; it stops when the phase ends.
-  readonly property bool busy: OmaStore.phase === "auth" || OmaStore.phase === "connecting"
 
   function requestDisconnect() { OmaStore.disconnect() }
   function chooseProfile(name) { OmaStore.chooseProfile(name) }
@@ -85,20 +68,6 @@ Panel {
   Component.onCompleted: applySettings()
   onSettingsChanged: applySettings()
 
-  // The only timer in the plugin: it drives the busy icon. It does not poll.
-  Timer {
-    id: busyTick
-    interval: 90
-    repeat: true
-    running: root.busy && !Style.reduceMotion
-    onTriggered: {
-      root.iconAngle = (root.iconAngle + 24) % 360
-      root.pulseTick += 1
-      if (root.pulseTick % 8 === 0)
-        root.pulseOn = !root.pulseOn
-    }
-  }
-
   FontMetrics {
     id: ipMetrics
     font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -121,24 +90,11 @@ Panel {
         Row {
           anchors.centerIn: parent
           spacing: Style.space(4)
-          Text {
+          ShieldMark {
             objectName: "barGlyph"
             anchors.verticalCenter: parent.verticalCenter
-            text: "\u{f132}"
-            textFormat: Text.PlainText
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.bar.iconFont
-            renderType: Text.NativeRendering
-            color: root.iconColor
-            opacity: OmaStore.phase === "auth" && !root.pulseOn ? 0.35 : 1
-            rotation: root.iconAngle
-            transformOrigin: Item.Center
-            Behavior on rotation {
-              RotationAnimation {
-                duration: Style.duration(90)
-                direction: RotationAnimation.Clockwise
-              }
-            }
+            size: Style.bar.iconFont
+            ripple: false
           }
           Text {
             objectName: "barIp"
@@ -149,7 +105,7 @@ Panel {
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.body
             renderType: Text.NativeRendering
-            color: root.iconColor
+            color: ShieldMotion.tint
           }
         }
       }

@@ -10,7 +10,7 @@ OmaGlobal is not affiliated with Palo Alto Networks or the GP Connect app.
 2. Click its icon and press **Install**. A terminal opens and asks for your password once. When it says `Setup finished.`, you can close it. The dropdown moves on by itself.
 3. On the welcome screen, type your VPN portal address (like `vpn.example.com`) and press **Connect**. Sign in when the window appears. If you don't know it, ask whoever runs the VPN for the "GlobalProtect portal address".
 
-That's it. The icon turns green when you are connected.
+That's it. The shield in the bar and in the dropdown move together: a line traces it while connecting, it fills with a tick when connected, and it shows an X if the connection fails. Its colors come from your Omarchy theme.
 
 If an update brings a newer background service, the dropdown says so and shows **Update**. It asks for your password once, the same way Install does, and comes straight back.
 

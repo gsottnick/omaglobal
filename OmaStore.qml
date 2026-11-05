@@ -132,8 +132,12 @@ Singleton {
       return "Starting tunnel"
     if (procRunning() && phase === "off")
       return "Opening sign-in"
+    // The helper retries a failed tunnel before it reports one.
+    if (procRunning() && phase === "failed")
+      return "Starting tunnel"
     return ""
   }
+  readonly property bool attempting: stepText !== "" && phase !== "connected"
 
   function redact(value) {
     return String(value || "").replace(/[A-Za-z0-9+/=]{40,}/g, "[redacted]")

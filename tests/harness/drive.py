@@ -571,6 +571,40 @@ def scenario_real_connect(shell: Path) -> None:
     print("REALCONNECT welcome to connected to disconnected")
 
 
+def scenario_shield(shell: Path) -> None:
+    """Bar and dropdown share one mood, and a retry inside a connect never flashes failure."""
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    sock = os.path.join(root, "run", "ctrl.sock")
+    env = ready_env(root, sock)
+    seed(env, ADD)
+    fake = start_fake(sock)
+    try:
+        moods = [("off", "off"), ("auth", "busy"), ("connecting", "busy"), ("connected", "on"), ("failed", "fail"), ("off", "off")]
+        steps = ["open", "screen:main"]
+        for pushed, mood in moods:
+            steps += [f"push:{pushed}", f"await:heroShield:mood={mood}", f"expect:barGlyph:mood={mood}"]
+        proc = run_main(shell, BASE_SETTINGS, ",".join(steps), sock, None, False, env)
+        steps_ok(proc, "shield moods")
+    finally:
+        stop_fake(fake)
+
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    sock = os.path.join(root, "run", "ctrl.sock")
+    env = ready_env(root, sock)
+    env["FAKE_OC_MODE"] = "need-authgroup"
+    seed(env, ADD)
+    daemon = real_daemon(root, sock, env)
+    try:
+        # Watching starts first: the retry is over in milliseconds.
+        steps = "open,screen:main,connectWatched:heroShield:mood=fail,await:heroState:text=Connected"
+        proc = run_main(shell, BASE_SETTINGS, steps, sock, None, False, env)
+        steps_ok(proc, "shield retry")
+    finally:
+        daemon.terminate()
+        daemon.wait(timeout=5)
+    print("SHIELD one mood everywhere; a retry stays busy")
+
+
 def scenario_cancel(shell: Path) -> None:
     """Cancel closes the sign-in window, and a password VPN asks every time."""
     root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
@@ -684,6 +718,7 @@ def main() -> int:
     scenario_editor_controls(shell)
     scenario_manage(shell)
     scenario_real_connect(shell)
+    scenario_shield(shell)
     scenario_cancel(shell)
     scenario_update(shell)
     scenario_negative(shell)

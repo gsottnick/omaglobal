@@ -486,6 +486,30 @@ def apply_step(step, plugin, store):
             QTimer.singleShot(100, loop.quit)
             loop.exec()
         raise SystemExit(f"screen never became {argument}")
+    elif name == "connectWatched":
+        # Click Connect with a watch already on, so no moment of the attempt is missed.
+        target, _, rest = argument.partition(":")
+        prop, _, wanted = rest.partition("=")
+        item = resolve(plugin, target)
+        seen = []
+        getattr(item, prop + "Changed").connect(lambda *_: seen.append(item.property(prop)))
+        real_click(plugin, "vpnConnectButton")
+        settle(1500)
+        print(f"WATCHED {target}.{prop} {seen}", flush=True)
+        if wanted in seen or "on" not in seen:
+            raise SystemExit(f"STEP FAILED: {target}.{prop} went {seen}")
+    elif name == "film":
+        # film:dir:frames:gap_ms grabs a run of frames from the live animation.
+        from PySide6.QtGui import QGuiApplication
+
+        where, count, gap = argument.split(":")
+        Path(where).mkdir(parents=True, exist_ok=True)
+        windows = [w for w in QGuiApplication.allWindows() if w.isVisible() and w.width() > 1]
+        start = len(list(Path(where).glob("*.png")))
+        for frame in range(int(count)):
+            for index, window in enumerate(windows):
+                window.grabWindow().save(str(Path(where) / f"{start + frame:04d}-{index}.png"))
+            settle(int(gap))
     elif name == "shot":
         from PySide6.QtCore import Qt as _Qt
         from PySide6.QtGui import QGuiApplication
