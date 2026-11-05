@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -313,6 +314,52 @@ def transact(payload: dict[str, object], terminal: bool, timeout: float = 12) ->
         client.close()
 
 
+def saml_python() -> str:
+    """An interpreter that can import gi.
+
+    A version-manager shim (mise, pyenv, asdf) first on PATH shadows the
+    distro python that python-gobject was built for, and the shim also
+    hides the versioned interpreters behind it. Probe every python3 on
+    PATH -- the current interpreter first -- and use the first whose
+    `import gi` succeeds.
+    """
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str | None) -> None:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    add(sys.executable)
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        # A shim (mise, pyenv, asdf) only dispatches to a real interpreter and
+        # can serialize on the manager's own lock; the scan finds the
+        # interpreter it points at, so probing shims only adds stalls.
+        if any(part == "shims" for part in os.path.normpath(directory).split(os.sep)):
+            continue
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in sorted(names):
+            if not re.fullmatch(r"python3(\.\d+)?", name):
+                continue
+            path = os.path.join(directory, name)
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                add(path)
+    for candidate in candidates:
+        try:
+            probe = subprocess.run(
+                [candidate, "-c", "import gi"], capture_output=True, timeout=10
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if probe.returncode == 0:
+            return candidate
+    return shutil.which("python3") or "python3"
+
+
 def saml_env_and_argv(portal: str, jar: str, interface: str = "portal", profile: dict[str, object] | None = None) -> tuple[dict[str, str], list[str]]:
     """Both WebKit variables, no -S/-P/-E/-x, cookie jar via -C.
 
@@ -324,7 +371,7 @@ def saml_env_and_argv(portal: str, jar: str, interface: str = "portal", profile:
     env["WEBKIT_DISABLE_DMABUF_RENDERER"] = "1"
     endpoint = "-p" if interface == "portal" else "-g"
     client_os = _CLIENT_OS.get(str(profile.get("os") or "")[:3], "Linux")
-    argv = ["python3", saml_script(), endpoint, "--clientos", client_os, "-C", jar]
+    argv = [saml_python(), saml_script(), endpoint, "--clientos", client_os, "-C", jar]
     if _is_set(profile.get("useragent")):
         argv += ["--user-agent", str(profile["useragent"])]
     if _is_set(profile.get("certificate")):
