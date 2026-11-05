@@ -1,0 +1,1035 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""gpvpnd — unprivileged-testable GlobalProtect tunnel daemon.
+
+The marketplace build never calls sudo or pkexec. Root, when it is used at
+all, is the systemd unit the user installed with tools/setup.sh. Tests pass
+--socket and --openconnect and run this as the normal user.
+
+The openconnect argument list is fixed. The prelogin cookie is written to
+the child's stdin and is never placed on the command line or in a log line.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import pwd
+import re
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+
+_COOKIE_SHAPED = re.compile(r"[A-Za-z0-9+/=]{40,}")
+_GATEWAY_LINE = re.compile(r"^\s*(.+?)\s+\(([^)]+)\)\s+\[priority\s+(\d+)\]\s*$")
+_GATEWAY_NAME = re.compile(r"^Gateway:\s*(.+?)\s*$")
+# openconnect 9.x says "Configured as <ip>, with SSL connected and ESP ...".
+_CONNECTED = re.compile(r"(?:Configured|Connected) as\s+([0-9A-Fa-f:.]+)")
+_EXPIRES = re.compile(r"Session authentication will expire at\s+(.+?)\s*$")
+_SERVERCERT_RE = re.compile(r"^(?:[0-9A-Fa-f]{40}|sha1:[0-9A-Fa-f]{40}|sha256:[0-9A-Fa-f]{64}|pin-sha256:[A-Za-z0-9+/]{43}=)$")
+
+_OS_VALUES = frozenset({
+    "win", "win7", "win8", "win8-1", "win10",
+    "mac", "mac-intel", "linux", "linux-64",
+    "android", "freebsd", "openbsd", "solaris",
+})
+
+_FILE_KEYS = {"csdWrapper", "cafile", "certificate", "sslkey", "vpncScript"}
+_FILE_FLAGS = {
+    "csdWrapper": "--csd-wrapper",
+    "cafile": "--cafile",
+    "certificate": "--certificate",
+    "sslkey": "--sslkey",
+    "vpncScript": "--script",
+}
+
+_ADMIN_KEYS = {"csdWrapper", "vpncScript"}  # admin-installed scripts
+_USER_KEYS = {"cafile", "certificate", "sslkey"}  # user-owned files
+
+BUSY = {"auth", "connecting", "connected"}
+
+
+def redact(text: str) -> str:
+    return _COOKIE_SHAPED.sub("[redacted]", text or "")
+
+
+def _plain_token(value: str, max_len: int = 512) -> bool:
+    if not value or value.startswith("-"):
+        return False
+    return "\n" not in value and "\x00" not in value and len(value) <= max_len
+
+
+def peer_cred(conn: socket.socket) -> tuple[int, int, int] | None:
+    """Return (pid, uid, gid) from the peer's SO_PEERCRED, or None."""
+    try:
+        # Must pass buflen to get all 12 bytes; without it Python returns
+        # only the first 4 bytes as an int on some versions.
+        data = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 16)
+        pid, uid, gid = struct.unpack("3i", data)
+        return (pid, uid, gid)
+    except OSError:
+        return None
+
+
+def _validate_admin_path(path: str, uid: int) -> str | None:
+    """Validate an admin-installed script path.
+
+    The resolved file must be owned by root (uid 0), have no group/other
+    write bit anywhere in the path chain, and every parent directory must
+    also be root-owned with no group/other write bit.
+
+    Returns an error message string, or None when valid.
+    """
+    resolved = os.path.realpath(path)
+    try:
+        st = os.stat(resolved)
+    except OSError:
+        return f"That file does not exist."
+    # File must be root-owned
+    if st.st_uid != 0:
+        return "That script must be installed by an admin (root) with safe permissions."
+    # File must not be group/other writable
+    if st.st_mode & 0o022:
+        return "That script must be installed by an admin (root) with safe permissions."
+    # Every parent directory up to / must be root-owned and not group/other writable
+    dirpath = os.path.dirname(resolved)
+    while dirpath and dirpath != "/":
+        try:
+            dst = os.stat(dirpath)
+        except OSError:
+            return "That path is not accessible."
+        if dst.st_uid != 0 or dst.st_mode & 0o022:
+            return "That script must be installed by an admin (root) with safe permissions."
+        dirpath = os.path.dirname(dirpath)
+    return None
+
+
+def open_checked(resolved_path: str, uid: int, gid: int | None = None) -> tuple[int, str | None]:
+    """Open a resolved, non-symlink path with ownership checks.
+
+    Opens the realpath with O_RDONLY|O_NOFOLLOW|O_CLOEXEC so the final
+    component cannot be swapped mid-open.  Runs fstat on the fd to verify
+    ownership and readability using the same rules as _validate_user_path.
+
+    Returns (fd, None) on success, or (-1, error_message) on failure.
+    The caller must close the fd on error.
+    """
+    try:
+        fd = os.open(
+            resolved_path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+    except OSError:
+        return (-1, "That file does not exist.")
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        return (-1, "That file is not accessible.")
+    # Must be owned by peer uid or root
+    if st.st_uid != uid and st.st_uid != 0:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    # Check read permission for peer
+    can_read = False
+    if st.st_uid == uid:
+        if st.st_mode & 0o400:
+            can_read = True
+    elif st.st_uid == 0:
+        if gid and (st.st_mode & 0o040) and st.st_gid == gid:
+            can_read = True
+        if st.st_mode & 0o004:
+            can_read = True
+    if not can_read:
+        os.close(fd)
+        return (-1, "That file is not readable by your account.")
+    return (fd, None)
+
+
+def _validate_user_path(path: str, uid: int, gid: int | None = None) -> str | None:
+    """Validate a user-owned file path.
+
+    The resolved file must be owned by the peer uid OR by root.
+    The peer uid must be able to READ it based on ownership and mode bits.
+    Symlink tricks die via realpath.
+
+    Returns an error message string, or None when valid.
+    """
+    resolved = os.path.realpath(path)
+    try:
+        st = os.stat(resolved)
+    except OSError:
+        return f"That file does not exist."
+    # Must be owned by peer uid or root
+    if st.st_uid != uid and st.st_uid != 0:
+        return "That file is not readable by your account."
+    # Check read permission for peer
+    can_read = False
+    if st.st_uid == uid:
+        # Owner read: needs 0o400 bit
+        if st.st_mode & 0o400:
+            can_read = True
+    elif st.st_uid == 0:
+        # Root-owned: check group/other read against peer's gid
+        if gid and (st.st_mode & 0o040):
+            # Group read — matches if peer's gid matches file's group
+            if st.st_gid == gid:
+                can_read = True
+        if st.st_mode & 0o004:
+            # Other read
+            can_read = True
+    if not can_read:
+        return "That file is not readable by your account."
+    return None
+
+
+def map_failure(last_line: str) -> str | None:
+    """Map openconnect failure lines to plain-language messages.
+
+    Returns a specific message for known patterns, or None to fall through
+    to the raw redacted line.
+    """
+    if not last_line:
+        return None
+    lower = last_line.lower()
+    # A normal progress line during a healthy connect.
+    if "no hip report" in lower or "will expire at" in lower:
+        return None
+
+    for pat in ["resolving", "getaddrinfo", "name or service not known"]:
+        if pat in lower:
+            return "Could not find that VPN address. Check the spelling and try again."
+
+    conn_patterns = [
+        "connection refused", "connection timed out", "network is unreachable",
+        "failed to connect", "failed to open https", "ssl handshake",
+        "tls handshake", "ssl connection failure",
+    ]
+    for pat in conn_patterns:
+        if pat in lower:
+            return "Could not reach the VPN server. Check the network and try again."
+
+    auth_patterns = [
+        "failed to authenticate", "authentication failed", "authentication failure",
+        "authentication required", "login failed", "gateway refused",
+        "invalid username or password",
+    ]
+    for pat in auth_patterns:
+        if pat in lower:
+            return "The VPN refused the sign-in. Check your username and password, or ask whoever runs the VPN."
+
+    for pat in ["hip report", "hip check", "host info", "host information policy", "csd"]:
+        if pat in lower:
+            return "This VPN wants a security check. Ask whoever runs the VPN for the check script (Advanced options)."
+
+    return None
+
+
+def explain_failure(lines: list[str]) -> str:
+    """openconnect ends every failure with the same line; the first specific one is the cause."""
+    for line in lines:
+        mapped = map_failure(line)
+        if mapped:
+            return mapped
+    if any(line.strip() for line in lines):
+        return "The VPN refused the connection. Check the portal address and try again."
+    return "Connection failed"
+
+
+def expiry_iso(raw: str) -> str:
+    """openconnect prints the expiry for people; the bar reads ISO."""
+    try:
+        # "Tue, 01 Jan 2030 00:00:00 EST": local time, so the zone name adds nothing.
+        return datetime.strptime(raw.rsplit(" ", 1)[0], "%a, %d %b %Y %H:%M:%S").isoformat()
+    except ValueError:
+        return raw
+
+
+def build_argv(
+    binary: str,
+    user: str,
+    usergroup: str,
+    server: str,
+    options: dict | None = None,
+    password_mode: bool = False,
+    peer_uid: int | None = None,
+    csd_user: str | None = None,
+) -> tuple[list[str], str | None]:
+    """Build the openconnect argv from a whitelist of options.
+
+    Returns (argv, error_message).  error_message is non-None when an option
+    fails validation; in that case argv is the partial list built so far.
+    """
+    if not _plain_token(user) or not _plain_token(server):
+        return [], "Refusing an unsafe connect field"
+
+    # Validate options first so we can honour an ``os`` override and avoid
+    # emitting the default ``--os linux-64`` alongside a user-supplied one.
+    err = _validate_options(options, password_mode, usergroup, peer_uid)
+    if err:
+        return [], err
+
+    os_value = options.get("os") if options else None  # type: ignore[union-attr]
+    if not os_value:
+        os_value = "linux-64"
+
+    args = [binary, "--protocol=gp", "--user", user]
+
+    if not password_mode:
+        # Cookie mode: always include --usergroup
+        if not _plain_token(usergroup):
+            return [], "Refusing an unsafe connect field"
+        if not usergroup or _COOKIE_SHAPED.search(usergroup):
+            return [], "Refusing an unsafe connect field"
+        args.extend([
+            "--passwd-on-stdin", "--non-inter",
+            "--useragent", "PAN GlobalProtect", "--os", os_value,
+            "--usergroup", usergroup,
+        ])
+    else:
+        # Password mode: only include --usergroup when explicitly provided and valid
+        if usergroup and _plain_token(usergroup):
+            args.extend([
+                "--passwd-on-stdin", "--non-inter",
+                "--useragent", "PAN GlobalProtect", "--os", os_value,
+                "--usergroup", usergroup,
+            ])
+        else:
+            args.extend([
+                "--passwd-on-stdin", "--non-inter",
+                "--useragent", "PAN GlobalProtect", "--os", os_value,
+            ])
+
+    # Append validated option flags (all before the positional server arg)
+    if options:
+        for key, value in options.items():
+            if key == "os":
+                continue  # already set as os_value above
+            if key == "useragent":
+                args.extend(["--useragent", value])
+            elif key in _FILE_KEYS:
+                flag = _FILE_FLAGS[key]
+                if key == "csdWrapper" and csd_user:
+                    args.extend([flag, value, "--csd-user", csd_user])
+                else:
+                    args.extend([flag, value])
+            elif key == "servercert":
+                args.append(f"--servercert={value}")
+            elif key == "baseMtu":
+                args.append(f"--base-mtu={int(value)}")
+            elif key == "noDtls" and value is True:
+                args.append("--no-dtls")
+            elif key == "reconnectTimeout":
+                args.append(f"--reconnect-timeout={int(value)}")
+            elif key == "authgroup":
+                args.append(f"--authgroup={value}")
+
+    args.append(server)
+    return args, None
+
+
+def _validate_options(
+    options: dict | None,
+    password_mode: bool,
+    usergroup: str,
+    peer_uid: int | None = None,
+) -> str | None:
+    """Validate whitelist options against the connect request.
+
+    Returns an error string on failure; ``None`` on success.
+    No side effects — does not open any files.
+    """
+    if not options:
+        return None
+
+    for key, value in options.items():
+        if key == "os":
+            if value not in _OS_VALUES:
+                return f"Invalid os value: {value}"
+
+        elif key == "useragent":
+            if not _plain_token(value, 256):
+                return f"Invalid useragent value"
+
+        elif key in _FILE_KEYS:
+            flag = _FILE_FLAGS[key]
+            if not isinstance(value, str) or not value or not _plain_token(value):
+                return f"Invalid {key} value"
+            if not os.path.isabs(value):
+                return f"{key} must be an absolute path"
+
+            # Security: validate file ownership and permissions
+            if peer_uid is not None:
+                if key in _ADMIN_KEYS:
+                    err = _validate_admin_path(value, peer_uid)
+                    if err:
+                        return err
+                elif key in _USER_KEYS:
+                    # Get gid from uid for user-file checks
+                    gid = None
+                    try:
+                        pw = pwd.getpwuid(peer_uid)
+                        gid = pw.pw_gid
+                    except KeyError:
+                        pass
+                    err = _validate_user_path(value, peer_uid, gid)
+                    if err:
+                        return err
+            else:
+                # No peer cred available (e.g. systemd activation): refuse file/script options
+                return "That option is not allowed with this connection."
+
+        elif key == "servercert":
+            if not isinstance(value, str) or not _SERVERCERT_RE.match(value):
+                return f"Invalid servercert value"
+
+        elif key == "authgroup":
+            if not isinstance(value, str) or not _plain_token(value, 256):
+                return "Invalid gateway name"
+
+        elif key == "baseMtu":
+            try:
+                v = int(value)
+            except (ValueError, TypeError):
+                return f"Invalid baseMtu value"
+            if v < 576 or v > 65535:
+                return f"baseMtu out of range"
+
+        elif key == "noDtls":
+            if value is True:
+                pass  # handled by build_argv
+
+        elif key == "reconnectTimeout":
+            try:
+                v = int(value)
+            except (ValueError, TypeError):
+                return f"Invalid reconnectTimeout value"
+            if v < 10 or v > 86400:
+                return f"reconnectTimeout out of range"
+
+        else:
+            return f"Unknown option: {key}"
+
+    return None
+
+
+def _open_user_files(
+    options: dict | None,
+    peer_uid: int | None = None,
+    open_files: dict[str, tuple[int, str | None]] | None = None,
+) -> str | None:
+    """Open USER_KEYS files with O_RDONLY|O_NOFOLLOW after validation.
+
+    Called only after ``_validate_options`` succeeds.  Stores (fd, None)
+    tuples in *open_files* for each successfully opened file.  Returns an
+    error string on failure; the caller must close any surviving fds.
+    """
+    if not options or open_files is None:
+        return None
+
+    for key, value in options.items():
+        if key not in _USER_KEYS:
+            continue
+        gid = None
+        try:
+            pw = pwd.getpwuid(peer_uid)  # type: ignore[arg-type]
+            gid = pw.pw_gid
+        except KeyError:
+            pass
+        resolved = os.path.realpath(value)
+        fd, open_err = open_checked(resolved, peer_uid, gid)  # type: ignore[arg-type]
+        if open_err:
+            return open_err
+        open_files[key] = (fd, None)
+    return None
+
+
+class Daemon:
+    def __init__(self, openconnect: str, state_file: str, verbose: bool) -> None:
+        self.openconnect = openconnect
+        self.state_file = state_file
+        self.verbose = verbose
+        self.lock = threading.Lock()
+        self.clients: list[socket.socket] = []
+        self.proc: subprocess.Popen[str] | None = None
+        self.want_disconnect = False
+        self.stopping = False
+        self.server: socket.socket | None = None
+        self.state = "idle"
+        self.ip = ""
+        self.gateway = ""
+        self.user = ""
+        self.expires = ""
+        self.since = 0
+        self.message = ""
+        self.server_host = ""
+        self.gateways: list[dict[str, object]] = []
+        self.manual_gateway = ""
+        self.last_line = ""
+        self.recent_lines: list[str] = []
+        # Traffic stats
+        self.rx_bytes = 0
+        self.tx_bytes = 0
+        self.iface = ""
+        self._stats_thread: threading.Thread | None = None
+        self._load_state()
+
+    def public(self) -> dict[str, object]:
+        return {
+            "state": self.state,
+            "ip": self.ip,
+            "gateway": self.gateway,
+            "user": self.user,
+            "expires": self.expires,
+            "since": self.since,
+            "message": self.message,
+            "server": self.server_host,
+            "gateways": self.gateways,
+            "rxBytes": self.rx_bytes,
+            "txBytes": self.tx_bytes,
+            "iface": self.iface,
+        }
+
+    @staticmethod
+    def netdev_stats(base: str, iface: str) -> tuple[int, int] | None:
+        """Read rx/tx bytes for *iface* under *base*.
+
+        Returns (rx_bytes, tx_bytes) or None when the interface data is
+        unavailable.
+        """
+        try:
+            rx_path = os.path.join(base, iface, "statistics", "rx_bytes")
+            tx_path = os.path.join(base, iface, "statistics", "tx_bytes")
+            with open(rx_path, encoding="utf-8") as fh:
+                rx = int(fh.read().strip())
+            with open(tx_path, encoding="utf-8") as fh:
+                tx = int(fh.read().strip())
+            return rx, tx
+        except (OSError, ValueError):
+            return None
+
+    # ---- traffic stats --------------------------------------------------
+
+    def _start_traffic_stats(self) -> None:
+        with self.lock:
+            initial = set()
+            try:
+                initial = set(os.listdir("/sys/class/net"))
+            except OSError:
+                pass
+            self._stats_thread = threading.Thread(
+                target=self._traffic_loop, args=(initial,), daemon=True
+            )
+            self._stats_thread.start()
+
+    def _traffic_loop(self, initial: set[str]) -> None:
+        while True:
+            time.sleep(5)
+            try:
+                current = set(os.listdir("/sys/class/net"))
+            except OSError:
+                continue
+            new = {n for n in current if n not in initial}
+            if not new:
+                continue
+            # Prefer interfaces starting with "tun" or "gp"
+            preferred = [n for n in new if n.startswith("tun") or n.startswith("gp")]
+            iface = preferred[0] if preferred else sorted(new)[0]
+            base = "/sys/class/net"
+            while True:
+                result = self.netdev_stats(base, iface)
+                if result is not None:
+                    rx, tx = result
+                    with self.lock:
+                        if self.state not in BUSY:
+                            return
+                        if self.rx_bytes != rx or self.tx_bytes != tx or self.iface != iface:
+                            self.rx_bytes = rx
+                            self.tx_bytes = tx
+                            self.iface = iface
+                            snap = dict(self.public())
+                    self._broadcast({"type": "state", **snap})
+                time.sleep(5)
+
+    def _stop_traffic_stats(self) -> None:
+        self._clear_traffic_stats()
+        if self._stats_thread is not None:
+            self._stats_thread.join(timeout=2)
+            self._stats_thread = None
+
+    def _clear_traffic_stats(self) -> None:
+        self.rx_bytes = 0
+        self.tx_bytes = 0
+        self.iface = ""
+
+    # ---------------------------------------------------------------------
+
+    def _load_state(self) -> None:
+        if not self.state_file or not os.path.isfile(self.state_file):
+            return
+        try:
+            saved = json.loads(open(self.state_file, encoding="utf-8").read())
+        except (OSError, json.JSONDecodeError):
+            return
+        # A previous summary is only a hint. No child is alive at startup,
+        # so a saved "connected" must not paint a live tunnel.
+        self.gateway = str(saved.get("gateway") or "")
+        self.user = ""
+        self.state = "idle"
+
+    def _save_state(self) -> None:
+        if not self.state_file:
+            return
+        blob = redact(json.dumps(self.public()))
+        tmp = self.state_file + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(self.state_file) or ".", exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(blob)
+                handle.write("\n")
+            os.replace(tmp, self.state_file)
+        except OSError:
+            return
+
+    def _broadcast(self, message: dict[str, object]) -> None:
+        data = (json.dumps(message) + "\n").encode()
+        with self.lock:
+            clients = list(self.clients)
+        dead: list[socket.socket] = []
+        for client in clients:
+            try:
+                client.sendall(data)
+            except OSError:
+                dead.append(client)
+        if dead:
+            with self.lock:
+                for client in dead:
+                    if client in self.clients:
+                        self.clients.remove(client)
+
+    def _send(self, client: socket.socket, message: dict[str, object]) -> None:
+        try:
+            client.sendall((json.dumps(message) + "\n").encode())
+        except OSError:
+            pass
+
+    def _enter(self, state: str, **fields: object) -> None:
+        with self.lock:
+            for key, value in fields.items():
+                setattr(self, key, value)
+            if state == "idle":
+                self.ip = ""
+                self.expires = ""
+                self.server_host = ""
+                self._clear_traffic_stats()
+            self.state = state
+            if state == "connected":
+                self.since = int(time.time())
+                self.message = ""
+            snap = dict(self.public())
+        if self.verbose:
+            print(f"state {state}", file=sys.stderr)
+        self._save_state()
+        self._broadcast({"type": "state", **snap})
+
+    def _kill(self, proc: subprocess.Popen[str] | None) -> None:
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            try:
+                proc.terminate()
+            except OSError:
+                return
+
+    def dispatch(self, request: dict[str, object], uid: int | None = None) -> dict[str, object] | None:
+        command = request.get("cmd")
+        if command == "status":
+            with self.lock:
+                return {"type": "state", **self.public()}
+        if command == "disconnect":
+            return self.disconnect()
+        if command == "connect":
+            return self.start_connect(request, uid)
+        return {"type": "error", "message": "Unknown command"}
+
+    def start_connect(self, request: dict[str, object], uid: int | None = None) -> dict[str, object]:
+        cookie = str(request.get("cookie") or "")
+        user = str(request.get("user") or "")
+        server = str(request.get("server") or "")
+        password = str(request.get("password") or "")
+        usergroup = str(request.get("usergroup") or "")
+        gateway = str(request.get("gateway") or "")
+        options = request.get("options")
+        if not isinstance(options, dict):
+            options = None
+
+        # A password goes to openconnect's stdin, so only a line break can harm it.
+        password_mode = bool(password) and "\n" not in password and "\x00" not in password
+
+        # Validate non-password fields
+        if not _plain_token(server) or not _plain_token(user):
+            return {"type": "error", "message": "Refusing an unsafe connect field"}
+        if password_mode:
+            if usergroup and not _plain_token(usergroup):
+                return {"type": "error", "message": "Refusing an unsafe connect field"}
+        else:
+            if not _plain_token(usergroup):
+                return {"type": "error", "message": "Refusing an unsafe connect field"}
+            if not cookie or _COOKIE_SHAPED.search(usergroup):
+                return {"type": "error", "message": "Refusing an unsafe connect field"}
+
+        # Resolve csd_user for --csd-user flag
+        csd_user = None
+        if uid is not None:
+            try:
+                csd_user = pwd.getpwuid(uid).pw_name
+            except KeyError:
+                pass  # no passwd entry; csd_user stays None
+
+        # Security: csdWrapper requires --csd-user to prevent root from
+        # running the user's script directly.  Refuse when we can't
+        # resolve the peer's username.
+        if csd_user is None and isinstance(options, dict) and "csdWrapper" in options:
+            return {"type": "error", "message": "Cannot find your user name, so the security check script cannot run safely."}
+
+        # Validate options against whitelist (pure check, no side effects)
+        err = _validate_options(options, password_mode, usergroup, uid)
+        if err:
+            return {"type": "error", "message": err}
+
+        # Open USER_KEYS files with O_NOFOLLOW for TOCTOU safety.
+        open_files: dict[str, tuple[int, str | None]] = {}
+        open_err = _open_user_files(options, uid, open_files)
+        if open_err:
+            return {"type": "error", "message": open_err}
+        # Replace file paths in options with /dev/fd/N so build_argv
+        # uses the fd-based paths in the final argv.
+        for key, (fd, _) in open_files.items():
+            if key in options and isinstance(options[key], str):
+                options[key] = f"/dev/fd/{fd}"
+        # Build argv with validated, fd-based paths
+        args, err = build_argv(
+            self.openconnect, user, usergroup, server,
+            options=options, password_mode=password_mode,
+            peer_uid=uid, csd_user=csd_user,
+        )
+        if err:
+            return {"type": "error", "message": err}
+        # Store validated fds on self so _run_tunnel can pass them to Popen.
+        with self.lock:
+            self._validated_fds = {k: v[0] for k, v in open_files.items() if v[1] is None}
+
+        with self.lock:
+            if self.state in BUSY:
+                return {"type": "error", "message": "Already connecting or connected"}
+            self.want_disconnect = False
+            self.user = user
+            self.server_host = server
+            self.manual_gateway = gateway
+            self.gateway = gateway
+            self.ip = ""
+            self.expires = ""
+            self.message = ""
+            self.gateways = []
+            self.recent_lines = []
+            self.last_line = ""
+            self.state = "auth"
+            self.since = int(time.time())
+            snap = dict(self.public())
+        self._save_state()
+        self._broadcast({"type": "state", **snap})
+        threading.Thread(
+            target=self._run_tunnel,
+            args=(args, password, cookie),
+            daemon=True,
+        ).start()
+        return {"type": "accepted", **snap}
+
+    def disconnect(self) -> dict[str, object]:
+        with self.lock:
+            self.want_disconnect = True
+            proc = self.proc
+            self.state = "idle"
+            self.ip = ""
+            self.expires = ""
+            self.message = ""
+            self.server_host = ""
+            snap = dict(self.public())
+        self._kill(proc)
+        self._stop_traffic_stats()
+        self._save_state()
+        self._broadcast({"type": "state", **snap})
+        return {"type": "accepted", **snap}
+
+    def _run_tunnel(self, argv: list[str], password: str, cookie: str) -> None:
+        # Collect file descriptors that must stay open for the child.
+        # These were opened during validation with O_NOFOLLOW and point to
+        # the verified inode; they survive symlink swaps.
+        fds_to_pass: list[int] = []
+        with self.lock:
+            fds_to_pass = list(getattr(self, "_validated_fds", {}).values())
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                text=True,
+                pass_fds=fds_to_pass,
+            )
+        except OSError:
+            self._enter("failed", message="Could not start the tunnel")
+            return
+        # Close parent-side copies of the validated fds immediately.
+        # The child keeps them via pass_fds.
+        for fd in fds_to_pass:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        with self.lock:
+            if self.want_disconnect or self.stopping:
+                self.proc = proc
+                intentional = True
+            else:
+                self.proc = proc
+                intentional = False
+        try:
+            if proc.stdin is not None:
+                if password:
+                    proc.stdin.write(password + "\n")
+                else:
+                    proc.stdin.write(cookie + "\n")
+                proc.stdin.close()
+        except OSError:
+            pass
+        # The cookie/password leaves scope here. They are not stored on the daemon.
+        del cookie, password
+        if intentional:
+            self._kill(proc)
+        else:
+            self._enter("connecting")
+            self._start_traffic_stats()
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            self._on_output(line.rstrip("\n"))
+        proc.wait()
+        with self.lock:
+            self.proc = None
+            intentional = self.want_disconnect
+            self.want_disconnect = False
+            current = self.state
+        if intentional or self.stopping:
+            if current != "idle":
+                self._enter("idle")
+            return
+        if current == "connected":
+            self._enter("dropped", message="The connection ended unexpectedly. Check your internet connection.")
+        else:
+            self._enter("failed", message=explain_failure(self.recent_lines))
+
+    def _on_output(self, line: str) -> None:
+        with self.lock:
+            if self.want_disconnect or self.stopping:
+                return
+        redacted = redact(line)
+        self.last_line = redacted
+        self.recent_lines = (self.recent_lines + [redacted])[-12:]
+        self._broadcast({"type": "log", "line": redacted})
+        gateway_line = _GATEWAY_LINE.match(line)
+        if gateway_line:
+            entry = {
+                "name": gateway_line.group(1).strip(),
+                "host": gateway_line.group(2).strip(),
+                "priority": int(gateway_line.group(3)),
+            }
+            with self.lock:
+                self.gateways.append(entry)
+                if not self.manual_gateway:
+                    # The list prints unsorted; openconnect's first choice is the lowest priority.
+                    self.gateway = str(min(self.gateways, key=lambda item: item["priority"])["name"])
+                current = self.state
+                snap = dict(self.public())
+            if current == "connected":
+                self._broadcast({"type": "state", **snap})
+            return
+        named = _GATEWAY_NAME.match(line)
+        if named:
+            with self.lock:
+                if not self.manual_gateway:
+                    self.gateway = named.group(1).strip()
+                current = self.state
+                snap = dict(self.public())
+            if current == "connected":
+                self._broadcast({"type": "state", **snap})
+            return
+        expiry = _EXPIRES.search(line)
+        if expiry:
+            with self.lock:
+                self.expires = expiry_iso(expiry.group(1))
+                current = self.state
+                snap = dict(self.public())
+            if current == "connected":
+                self._broadcast({"type": "state", **snap})
+            return
+        connected = _CONNECTED.search(line)
+        if connected:
+            with self.lock:
+                self.ip = connected.group(1)
+                if not self.gateway:
+                    self.gateway = self.server_host
+            self._enter("connected")
+
+    def _adopt_listen_fd(self) -> socket.socket | None:
+        """Use the socket systemd already bound. Never unlink that path.
+
+        gp-vpn.socket is mode 0660 and group wheel. Replacing it drops the
+        client that caused activation and leaves a root-owned socket the bar
+        user cannot open. LISTEN_PID must be this process, same as sd_listen_fds.
+        """
+        raw_pid = os.environ.get("LISTEN_PID")
+        raw_count = os.environ.get("LISTEN_FDS")
+        if not raw_pid or raw_pid != str(os.getpid()) or not raw_count:
+            return None
+        try:
+            count = int(raw_count)
+        except ValueError:
+            return None
+        if count < 1:
+            return None
+        for key in ("LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES"):
+            os.environ.pop(key, None)
+        fd = 3
+        os.set_inheritable(fd, False)
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+        adopted = socket.socket(fileno=fd)
+        adopted.set_inheritable(False)
+        adopted.settimeout(0.5)
+        return adopted
+
+    def _live_socket(self, path: str) -> bool:
+        """True when some process is already accepting on this path."""
+        if not os.path.exists(path):
+            return False
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.2)
+        try:
+            probe.connect(path)
+        except OSError:
+            return False
+        finally:
+            probe.close()
+        return True
+
+    def serve(self, path: str) -> None:
+        adopted = self._adopt_listen_fd()
+        if adopted is not None:
+            server = adopted
+        else:
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            if self._live_socket(path):
+                print(f"gpvpnd: {path} is already being served", file=sys.stderr)
+                raise SystemExit(1)
+            # Hold the lock until this process exits, including a crash.
+            # A second manual start then fails instead of unlinking the live socket.
+            self._lock_fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                print(f"gpvpnd: {path} is already being served", file=sys.stderr)
+                raise SystemExit(1)
+            if os.path.exists(path):
+                os.unlink(path)
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(path)
+            os.chmod(path, 0o660)
+            server.listen(8)
+            server.settimeout(0.5)
+        self.server = server
+
+        def _stop(_signum: int, _frame: object) -> None:
+            self.stopping = True
+            self._kill(self.proc)
+            try:
+                server.close()
+            except OSError:
+                pass
+
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
+        while not self.stopping:
+            try:
+                conn, _addr = server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._client, args=(conn,), daemon=True).start()
+
+    def _client(self, conn: socket.socket) -> None:
+        # Get peer identity from unix socket credentials
+        cred = peer_cred(conn)
+        uid = cred[1] if cred else None  # type: ignore[index]
+        with self.lock:
+            self.clients.append(conn)
+        buffer = b""
+        try:
+            while not self.stopping:
+                try:
+                    chunk = conn.recv(65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buffer += chunk
+                while b"\n" in buffer:
+                    raw, buffer = buffer.split(b"\n", 1)
+                    if not raw.strip():
+                        continue
+                    try:
+                        request = json.loads(raw.decode("utf-8"))
+                    except json.JSONDecodeError:
+                        self._send(conn, {"type": "error", "message": "Bad request"})
+                        continue
+                    if not isinstance(request, dict):
+                        self._send(conn, {"type": "error", "message": "Bad request"})
+                        continue
+                    reply = self.dispatch(request, uid)
+                    if reply is not None:
+                        self._send(conn, reply)
+        finally:
+            with self.lock:
+                if conn in self.clients:
+                    self.clients.remove(conn)
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="gpvpnd")
+    parser.add_argument("--socket", default=os.environ.get("GPVPN_SOCKET") or "/run/gp-vpn/ctrl.sock")
+    parser.add_argument("--openconnect", default="openconnect")
+    parser.add_argument("--state-file", default="")
+    parser.add_argument("-v", action="store_true")
+    args = parser.parse_args(argv)
+    Daemon(args.openconnect, args.state_file, args.v).serve(args.socket)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

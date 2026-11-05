@@ -1,0 +1,994 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""gpvpn — user-session helper for OmaGlobal.
+
+Profiles, the SSO window, and the control-socket client live here. This
+process never calls sudo or pkexec. The cookie moves over the unix socket
+and is not printed. gp-saml-gui is spawned from an argument list, with the
+two WebKit-on-Hyprland environment variables set, and without exec flags.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import ctypes
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+
+SAML_PIN = "21cce40334791a533c7a263fe367f0ddc072d8fb"
+SETUP_HINT = "Daemon socket is not available. Press Install in the bar, or run tools/setup.sh once in a terminal."
+WEBKIT_HINT = "The login window needs webkit2gtk-4.1. Press Install in the bar, or run tools/setup.sh once in a terminal."
+CONNECT_WAIT = 90
+_COOKIE_SHAPED = re.compile(r"[A-Za-z0-9+/=]{40,}")
+
+_WHITELIST_KEYS = {
+    "os", "useragent", "csdWrapper",
+    "servercert", "cafile", "certificate", "sslkey", "baseMtu",
+    "noDtls", "reconnectTimeout", "vpncScript",
+}
+_PROFILE_OPTIONAL_KEYS = {"authMethod", "interface"}
+_ALL_OPTIONAL_KEYS = _WHITELIST_KEYS | _PROFILE_OPTIONAL_KEYS
+_PORTAL_HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::\d{1,5})?$")
+# What each value in the editor's "System type" maps to at sign-in.
+_CLIENT_OS = {"win": "Windows", "mac": "Mac"}
+_PATH_LABELS = {
+    "csdWrapper": "security check script",
+    "cafile": "certificate authority file",
+    "certificate": "client certificate",
+    "sslkey": "client key",
+    "vpncScript": "routing script",
+}
+
+
+def redact(text: str) -> str:
+    return _COOKIE_SHAPED.sub("[redacted]", text or "")
+
+
+def config_dir() -> str:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "gp-vpn")
+
+
+def profiles_path() -> str:
+    return os.path.join(config_dir(), "profiles.json")
+
+
+def socket_path() -> str:
+    return os.environ.get("GPVPN_SOCKET") or "/run/gp-vpn/ctrl.sock"
+
+
+def saml_script() -> str:
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "gp-vpn", "gp-saml-gui", "gp_saml_gui.py")
+
+
+def cookie_jar(profile_name: str) -> str:
+    digest = hashlib.sha256(profile_name.encode("utf-8")).hexdigest()[:8]
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "gp-vpn", f"okta-{digest}.json")
+
+
+def _is_set(value: object) -> bool:
+    """True when *value* is a non-empty string or a real bool/int."""
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, int):
+        return True
+    if isinstance(value, str):
+        return bool(value.strip())
+    return False
+
+
+def normalize(entry: dict[str, object]) -> dict[str, object]:
+    """Fill gaps and force gateway mode. A manual gateway is kept as given.
+
+    Optional fields are carried through only when they are set (non-empty
+    strings, booleans, integers).  Empty/missing optional fields are not
+    stored as empty strings.
+    """
+    gateways = entry.get("gateways")
+    profile: dict[str, object] = {
+        "name": str(entry.get("name") or "Default").strip() or "Default",
+        "portal": str(entry.get("portal") or ""),
+        "gateway": str(entry.get("gateway") or ""),
+        "gatewayName": str(entry.get("gatewayName") or ""),
+        "username": str(entry.get("username") or ""),
+        "mode": "gateway",
+    }
+    # Carry through optional fields that are actually set
+    for key in _ALL_OPTIONAL_KEYS:
+        if key in entry and _is_set(entry[key]):
+            profile[key] = entry[key]
+    if isinstance(gateways, list):
+        profile["gateways"] = gateways
+    return profile
+
+
+def load_profiles() -> dict[str, object]:
+    path = profiles_path()
+    if not os.path.isfile(path):
+        return {"profiles": [], "active": ""}
+    try:
+        raw = json.loads(open(path, encoding="utf-8").read())
+    except (OSError, json.JSONDecodeError):
+        return {"profiles": [], "active": ""}
+    profiles = [normalize(item) for item in raw.get("profiles", []) if isinstance(item, dict)]
+    active = str(raw.get("active") or "")
+    if not any(item["name"] == active for item in profiles):
+        active = str(profiles[0]["name"]) if profiles else ""
+    return {"profiles": profiles, "active": active}
+
+
+@contextlib.contextmanager
+def store_lock():
+    """profiles.json is read-modify-write and several helpers can run at once."""
+    os.makedirs(config_dir(), exist_ok=True)
+    with open(os.path.join(config_dir(), ".lock"), "a", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def remember_active(name: str) -> None:
+    # Reload: sign-in can take minutes, and the user can edit a VPN meanwhile.
+    with store_lock():
+        store = load_profiles()
+        if find_profile(store, name) is not None:
+            store["active"] = name
+            save_profiles(store)
+
+
+def clean_portal(text: object) -> str:
+    """vpn.example.com from anything a person pastes. "" when it is not an address."""
+    host = re.sub(r"^\w+://", "", str(text or "").strip()).split("/")[0].strip()
+    return host if _PORTAL_HOST.match(host) else ""
+
+
+def portal_problem(text: object) -> str:
+    if not str(text or "").strip():
+        return "Enter the VPN portal address."
+    return "" if clean_portal(text) else "That does not look like a VPN address. It should look like vpn.example.com."
+
+
+def tighten(path: str, mode: int) -> None:
+    """Restrict a private file. A failure is reported without its contents."""
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        print("Could not restrict a private VPN file.", file=sys.stderr)
+
+
+def save_profiles(store: dict[str, object]) -> None:
+    path = profiles_path()
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    tighten(directory, 0o700)
+    blob = json.dumps(store, indent=2) + "\n"
+    tmp = path + ".tmp"
+    handle = os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8")
+    try:
+        handle.write(blob)
+    finally:
+        handle.close()
+    os.replace(tmp, path)
+
+
+def find_profile(store: dict[str, object], name: str) -> dict[str, object] | None:
+    for item in store["profiles"]:
+        if isinstance(item, dict) and item.get("name") == name:
+            return item
+    return None
+
+
+def parse_saml(text: str) -> dict[str, str] | None:
+    """Parse gp-saml-gui's printed OpenConnect invocation.
+
+    Pinned to gp-saml-gui 21cce40334791a533c7a263fe367f0ddc072d8fb
+    (the "OpenConnect command line" block and its `echo COOKIE |` line).
+    A miss returns None. The cookie is not logged by this function.
+    """
+    marker = text.find("OpenConnect command line")
+    if marker < 0:
+        return None
+    block = text[marker:]
+    # The next section opens "SAML response converted to test-globalprotect-login.py".
+    stop = block.find("SAML response converted")
+    if stop > 0:
+        block = block[:stop]
+    cookie_m = re.search(r"^\s*echo\s+(\S+)\s*\|\s*$", block, re.M)
+    command_m = re.search(r"^\s*(?:sudo\s+)?openconnect\s+(.+?)\s*$", block, re.M)
+    if not (cookie_m and command_m):
+        return None
+    try:
+        tokens = shlex.split(command_m.group(1))
+    except ValueError:
+        return None
+    flags = dict(token[2:].split("=", 1) for token in tokens if token.startswith("--") and "=" in token)
+    servers = [token for token in tokens if not token.startswith("-")]
+    if not (flags.get("user") and flags.get("usergroup") and servers):
+        return None
+    return {
+        "cookie": cookie_m.group(1).strip("'\""),
+        "user": flags["user"],
+        "usergroup": flags["usergroup"],
+        "server": servers[0],
+    }
+
+
+def saml_failure(text: str) -> str:
+    """What went wrong before the tunnel, in plain words. gp-saml-gui's text stays private."""
+    lower = text.lower()
+    if "closed by user" in lower:
+        return "Sign-in was cancelled."
+    if "webkit2" in lower:
+        return WEBKIT_HINT
+    if "certificate" in lower and ("ssl" in lower or "verify" in lower):
+        return "The VPN's security certificate could not be checked. If it uses a private certificate authority, add that file under Edit, Advanced options."
+    if "does not contain saml tags" in lower:
+        return "This VPN does not use a sign-in window. Press Edit, choose Password under Sign in with, then connect again."
+    if "does not appear to be a globalprotect" in lower or "parseerror" in lower:
+        return "That address did not answer like a GlobalProtect VPN. Check the portal address."
+    if "name or service not known" in lower or "nameresolutionerror" in lower or "failed to resolve" in lower:
+        return "Could not find that VPN address. Check the spelling and your internet connection."
+    if "max retries exceeded" in lower or "timed out" in lower or "connection refused" in lower:
+        return "Could not reach the VPN. Check your internet connection and try again."
+    return "Sign-in did not finish. Try again."
+
+
+def other_interface(usergroup: str) -> str:
+    """Swap gateway <-> portal once. The cookie name after the colon stays."""
+    prefix, sep, rest = usergroup.partition(":")
+    swapped = {"gateway": "portal", "portal": "gateway"}.get(prefix)
+    if not swapped or not sep:
+        return usergroup
+    return f"{swapped}:{rest}"
+
+
+def connect_wait() -> float:
+    """How long a connect may stay in auth or connecting before we give up.
+
+    A real gateway can take longer than a few seconds after the login window
+    closes. Giving up early used to look like a failure and start a second
+    connect against a tunnel that was still coming up.
+    """
+    raw = os.environ.get("GPVPN_CONNECT_TIMEOUT", "")
+    if raw:
+        try:
+            return max(0.2, float(raw))
+        except ValueError:
+            pass
+    return float(CONNECT_WAIT)
+
+
+def transact(payload: dict[str, object], terminal: bool, timeout: float = 12) -> tuple[int, dict[str, object] | None]:
+    path = socket_path()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(timeout)
+    try:
+        client.connect(path)
+    except OSError:
+        print(SETUP_HINT, file=sys.stderr)
+        return 4, None
+    try:
+        client.sendall((json.dumps(payload) + "\n").encode())
+        buffer = b""
+        last: dict[str, object] | None = None
+        while True:
+            try:
+                chunk = client.recv(65536)
+            except socket.timeout:
+                return 5, last
+            if not chunk:
+                break
+            buffer += chunk
+            while b"\n" in buffer:
+                raw, buffer = buffer.split(b"\n", 1)
+                if not raw.strip():
+                    continue
+                try:
+                    message = json.loads(raw.decode("utf-8"))
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if message.get("type") == "log":
+                    continue
+                if message.get("type") == "error":
+                    return 5, message
+                if message.get("type") in {"accepted", "state"}:
+                    last = message
+                    state = str(message.get("state") or "")
+                    if not terminal or state in {"connected", "failed", "dropped"}:
+                        return 0, message
+        return 5, last
+    finally:
+        client.close()
+
+
+def saml_env_and_argv(portal: str, jar: str, interface: str = "portal", profile: dict[str, object] | None = None) -> tuple[dict[str, str], list[str]]:
+    """Both WebKit variables, no -S/-P/-E/-x, cookie jar via -C.
+
+    interface picks the sign-in endpoint: "gateway" (-g) or "portal" (-p).
+    The sign-in must report the same system and certificates as the tunnel."""
+    profile = profile or {}
+    env = os.environ.copy()
+    env["GDK_BACKEND"] = "x11"
+    env["WEBKIT_DISABLE_DMABUF_RENDERER"] = "1"
+    endpoint = "-p" if interface == "portal" else "-g"
+    client_os = _CLIENT_OS.get(str(profile.get("os") or "")[:3], "Linux")
+    argv = ["python3", saml_script(), endpoint, "--clientos", client_os, "-C", jar]
+    if _is_set(profile.get("useragent")):
+        argv += ["--user-agent", str(profile["useragent"])]
+    if _is_set(profile.get("certificate")):
+        argv += ["--cert", str(profile["certificate"])]
+        if _is_set(profile.get("sslkey")):
+            argv += ["--key", str(profile["sslkey"])]
+    if _is_set(profile.get("cafile")):
+        env["REQUESTS_CA_BUNDLE"] = str(profile["cafile"])
+    argv.append(portal)
+    forbidden = {"-S", "-P", "-E", "-x", "--exec"}
+    if forbidden.intersection(argv):
+        raise RuntimeError("refusing to spawn the login helper with an exec flag")
+    return env, argv
+
+
+def die_with_parent() -> None:
+    """Cancel in the bar stops this helper. The sign-in window must not outlive it."""
+    ctypes.CDLL(None).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+
+
+def run_saml(portal: str, jar: str, interface: str = "portal", profile: dict[str, object] | None = None) -> tuple[int, str]:
+    script = saml_script()
+    if not os.path.isfile(script):
+        print("Login helper is not installed. Press Install in the bar, or run tools/setup.sh once in a terminal.", file=sys.stderr)
+        return 1, ""
+    jar_dir = os.path.dirname(jar)
+    os.makedirs(jar_dir, exist_ok=True)
+    # The directory is the boundary. The login tool creates the jar itself,
+    # sometimes world-readable, and the jar is a reusable session secret.
+    tighten(jar_dir, 0o700)
+    env, argv = saml_env_and_argv(portal, jar, interface, profile)
+    try:
+        completed = subprocess.run(argv, env=env, capture_output=True, text=True, check=False, preexec_fn=die_with_parent)
+    except OSError:
+        print("Login helper could not be started.", file=sys.stderr)
+        return 1, ""
+    if os.path.isfile(jar):
+        tighten(jar, 0o600)
+    return completed.returncode, completed.stdout + "\n" + completed.stderr
+
+
+def _build_options(profile: dict[str, object]) -> dict[str, object]:
+    """Extract whitelisted option fields from a profile."""
+    options: dict[str, object] = {}
+    for key in _WHITELIST_KEYS:
+        if key in profile and _is_set(profile[key]):
+            options[key] = profile[key]
+    return options
+
+
+def connect_payload(profile: dict[str, object], parsed: dict[str, str], usergroup: str) -> dict[str, object]:
+    # A manual gateway host wins over the server parsed from the portal. Through
+    # the portal the choice travels as --authgroup instead, see portal_choice().
+    manual = "" if usergroup.startswith("portal:") else str(profile.get("gateway") or "")
+    server = manual or parsed["server"]
+    gateway = str(profile.get("gatewayName") or "") or str(profile.get("gateway") or "")
+    return {
+        "cmd": "connect",
+        "cookie": parsed["cookie"],
+        "user": parsed["user"],
+        "server": server,
+        "usergroup": usergroup,
+        "gateway": gateway,
+    }
+
+
+def password_connect_payload(profile: dict[str, object], password: str) -> dict[str, object]:
+    """Build a password-mode connect payload (no cookie, no SAML result)."""
+    direct = str(profile.get("interface") or "portal") == "gateway"
+    host = str(profile.get("gateway") or "") if direct else ""
+    server = host or str(profile.get("portal") or "")
+    gateway = str(profile.get("gatewayName") or "") or str(profile.get("gateway") or "")
+    payload: dict[str, object] = {
+        "cmd": "connect",
+        "user": str(profile.get("username") or ""),
+        "server": server,
+        "password": password,
+        "gateway": gateway,
+    }
+    if direct:
+        payload["usergroup"] = "gateway"
+    options = _build_options(profile)
+    options.update(portal_choice(profile, direct))
+    if options:
+        payload["options"] = options
+    return payload
+
+
+def portal_choice(profile: dict[str, object], direct: bool) -> dict[str, object]:
+    """The picked gateway. Without --authgroup, --non-inter fails on a portal with several."""
+    name = str(profile.get("gatewayName") or "")
+    return {"authgroup": name} if name and not direct else {}
+
+
+def best_gateway(message: dict[str, object] | None) -> str:
+    gateways = [item for item in (message or {}).get("gateways") or [] if isinstance(item, dict)]
+    return str(min(gateways, key=lambda item: int(item.get("priority") or 0)).get("name") or "") if gateways else ""
+
+
+def tunnel_failed(message: dict[str, object] | None) -> bool:
+    return str((message or {}).get("state") or "") in {"failed", "dropped"}
+
+
+def report(message: dict[str, object] | None, code: int) -> int:
+    if message is None:
+        return code or 5
+    if message.get("type") == "error":
+        print(redact(str(message.get("message") or "Connection refused")), file=sys.stderr)
+        return 5
+    safe = {key: value for key, value in message.items() if key != "cookie"}
+    print(redact(json.dumps(safe)))
+    state = str(message.get("state") or "")
+    if state in {"connected", "idle"}:
+        return 0
+    return 5
+
+
+def start_tunnel(profile: dict[str, object], payload: dict[str, object], alternate: dict[str, object] | None) -> int:
+    """Run the attempts for one connect. A portal with several gateways reports its
+    list on the first failure, so that attempt repeats with the best gateway picked."""
+    name = str(profile["name"])
+    status, message = transact(payload, terminal=True, timeout=connect_wait())
+    options = dict(payload.get("options") or {})
+    if status != 4 and tunnel_failed(message) and "authgroup" not in options and str(payload.get("usergroup") or "portal").startswith("portal"):
+        best = best_gateway(message)
+        if best:
+            payload = {**payload, "options": {**options, "authgroup": best}}
+            status, message = transact(payload, terminal=True, timeout=connect_wait())
+    if status != 4 and tunnel_failed(message) and alternate is not None:
+        # --authgroup picks from a portal's list; a gateway login has no list.
+        direct = {key: value for key, value in dict(payload.get("options") or {}).items() if key != "authgroup"}
+        status, second = transact({**alternate, **({"options": direct} if direct else {})}, terminal=True, timeout=connect_wait())
+        message = second or message
+    if status == 4:
+        return 4
+    if message and message.get("state") == "connected":
+        remember_active(name)
+        return report(message, 0)
+    return report(message or {}, status or 5)
+
+
+def cmd_connect(profile_name: str, debug: bool) -> int:
+    store = load_profiles()
+    name = profile_name or str(store.get("active") or "")
+    profile = find_profile(store, name)
+    if profile is None:
+        print("That VPN is no longer saved. Add it again from the bar.", file=sys.stderr)
+        return 2
+
+    # Password mode: skip SAML entirely, read password from stdin
+    auth_method = str(profile.get("authMethod") or "sso")
+    if auth_method == "password":
+        if not str(profile.get("username") or "").strip():
+            print("Password sign-in needs a username. Press Edit and add one.", file=sys.stderr)
+            return 1
+        raw_password = sys.stdin.readline()
+        if not raw_password:
+            print("No password was provided.", file=sys.stderr)
+            return 1
+        password = raw_password.rstrip("\n")
+        if not password:
+            print("No password was provided.", file=sys.stderr)
+            return 1
+        return start_tunnel(profile, password_connect_payload(profile, password), None)
+
+    interface = str(profile.get("interface") or "portal")
+    portal = str(profile["portal"])
+    jar = cookie_jar(str(profile["name"]))
+    code, text = run_saml(portal, jar, interface, profile)
+    if "interface does not exist" in text:
+        interface = "gateway" if interface == "portal" else "portal"
+        code, text = run_saml(portal, jar, interface, profile)
+    if debug:
+        sys.stderr.write(redact(text))
+    parsed = parse_saml(text)
+    if parsed is None:
+        if not text:  # run_saml already said why.
+            return 1
+        print(saml_failure(text), file=sys.stderr)
+        return 1 if code != 0 else 3
+    usergroup = parsed["usergroup"]
+    first = connect_payload(profile, parsed, usergroup)
+    options = {**_build_options(profile), **portal_choice(profile, usergroup.startswith("gateway:"))}
+    if options:
+        first["options"] = options
+    # One automatic retry with the other interface string (portal <-> gateway).
+    # This does not run the login helper again.
+    swapped = other_interface(usergroup)
+    alternate = connect_payload(profile, parsed, swapped) if swapped != usergroup else None
+    return start_tunnel(profile, first, alternate)
+
+
+def cmd_disconnect() -> int:
+    status, message = transact({"cmd": "disconnect"}, terminal=False)
+    if status == 4:
+        return 4
+    return report(message, 0 if message and message.get("state") == "idle" else status)
+
+
+def cmd_status() -> int:
+    status, message = transact({"cmd": "status"}, terminal=False)
+    if status == 4:
+        return 4
+    if message is None:
+        print(SETUP_HINT, file=sys.stderr)
+        return 4
+    print(redact(json.dumps({key: value for key, value in message.items() if key != "cookie"})))
+    return 0
+
+
+def cmd_setup_check() -> int:
+    status, message = transact({"cmd": "status"}, terminal=False, timeout=2)
+    if status == 4 or message is None:
+        return 4
+    return 0
+
+
+def _package_present(name: str) -> bool:
+    completed = subprocess.run(
+        ["pacman", "-Q", name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
+def _saml_present() -> bool:
+    script = saml_script()
+    repo = os.path.dirname(script)
+    if not os.path.isfile(script):
+        return False
+    completed = subprocess.run(
+        ["git", "-C", repo, "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return completed.returncode == 0 and completed.stdout.strip() == SAML_PIN
+
+
+def daemon_current() -> bool:
+    """The root daemon only changes when setup runs, so a plugin update can outrun it."""
+    installed = os.environ.get("GPVPN_DAEMON") or "/usr/local/bin/gpvpnd"
+    shipped = os.path.join(os.path.dirname(os.path.realpath(__file__)), "gpvpnd")
+    try:
+        with open(installed, "rb") as first, open(shipped, "rb") as second:
+            return first.read() == second.read()
+    except OSError:
+        return False
+
+
+def _socket_present() -> bool:
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(0.2)
+    try:
+        client.connect(socket_path())
+    except OSError:
+        return False
+    finally:
+        client.close()
+    return True
+
+
+def dep_items() -> list[dict[str, object]]:
+    """What setup.sh installs, and whether this machine already has it.
+
+    `required` is what the running plugin needs. git and wl-clipboard are
+    only there because the setup script installs them; a machine that already
+    has the tunnel, the login window, and the service does not need them.
+    """
+    packages = [
+        ("openconnect", "VPN tunnel", True),
+        ("python-requests", "Portal login", True),
+        ("python-gobject", "Login window", True),
+        ("gtk3", "Login window", True),
+        ("gobject-introspection", "Login window", True),
+        ("webkit2gtk-4.1", "Login window", True),
+        ("wl-clipboard", "Clipboard tools", False),
+        ("git", "Downloads the login helper", False),
+    ]
+    items: list[dict[str, object]] = []
+    for name, purpose, required in packages:
+        items.append(
+            {
+                "name": name,
+                "purpose": purpose,
+                "present": _package_present(name),
+                "required": required,
+            }
+        )
+    items.append(
+        {
+            "name": "gp-saml-gui",
+            "purpose": "Sign-in program",
+            "present": _saml_present(),
+            "required": True,
+        }
+    )
+    items.append(
+        {
+            "name": "gp-vpn.socket",
+            "purpose": "Background service that starts the tunnel",
+            "present": _socket_present(),
+            "required": True,
+        }
+    )
+    items.append(
+        {
+            "name": "gpvpnd",
+            "purpose": "Background service version",
+            "present": daemon_current(),
+            "required": True,
+        }
+    )
+    return items
+
+
+def cmd_deps() -> int:
+    items = dep_items()
+    ready = all(item["present"] for item in items if item["required"])
+    print(json.dumps({"ready": ready, "items": items}))
+    return 0
+
+
+def cmd_profile_list() -> int:
+    print(json.dumps(load_profiles()))
+    return 0
+
+
+def cmd_profile_add(args: argparse.Namespace) -> int:
+    problem = portal_problem(args.portal)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 2
+    store = load_profiles()
+    profile = normalize(
+        {
+            "name": args.name,
+            "portal": clean_portal(args.portal),
+            "username": args.username or "",
+            "gateway": args.gateway or "",
+            "gatewayName": args.gateway_name or "",
+            "mode": "gateway",
+        }
+    )
+    profiles = [item for item in store["profiles"] if item.get("name") != profile["name"]]
+    profiles.append(profile)
+    store["profiles"] = profiles
+    if not store.get("active"):
+        store["active"] = profile["name"]
+    save_profiles(store)
+    print(json.dumps(store))
+    return 0
+
+
+def cmd_profile_remove(name: str) -> int:
+    store = load_profiles()
+    store["profiles"] = [item for item in store["profiles"] if item.get("name") != name]
+    if store.get("active") == name:
+        store["active"] = store["profiles"][0]["name"] if store["profiles"] else ""
+    save_profiles(store)
+    # A removed VPN leaves no reusable sign-in behind.
+    if os.path.isfile(cookie_jar(name)):
+        os.unlink(cookie_jar(name))
+    print(json.dumps(store))
+    return 0
+
+
+def rename_profile(store: dict[str, object], profile: dict[str, object], new_name: str) -> None:
+    old = str(profile["name"])
+    profile["name"] = new_name
+    if store.get("active") == old:
+        store["active"] = new_name
+    if os.path.isfile(cookie_jar(old)):
+        os.replace(cookie_jar(old), cookie_jar(new_name))
+
+
+def apply_fields(profile: dict[str, object], fields: dict[str, object]) -> str:
+    """Copy editor fields onto a profile. Returns what is wrong, in plain words."""
+    problem = portal_problem(fields.get("portal"))
+    if problem:
+        return problem
+    portal = clean_portal(fields.get("portal"))
+    if portal != profile.get("portal"):
+        # The cached list and any pick belonged to the old portal.
+        profile.pop("gateways", None)
+        fields = {**fields, "gateway": "", "gatewayName": ""}
+    profile["portal"] = portal
+    for key in ("username", "gateway", "gatewayName"):
+        profile[key] = str(fields.get(key) or "").strip()
+
+    auth = str(fields.get("authMethod") or "sso")
+    interface = str(fields.get("interface") or "portal")
+    if auth not in ("sso", "password") or interface not in ("portal", "gateway"):
+        return "That sign-in choice is not valid."
+    if auth == "password" and not profile["username"]:
+        return "Password sign-in needs a username."
+    profile["authMethod"] = auth
+    profile["interface"] = interface
+    profile["noDtls"] = fields.get("noDtls") is True
+
+    # A blank field clears the setting.
+    for key in ("os", "useragent", "servercert"):
+        value = str(fields.get(key) or "").strip()
+        profile.pop(key, None)
+        if value:
+            profile[key] = value
+    for key, label in _PATH_LABELS.items():
+        value = os.path.expanduser(str(fields.get(key) or "").strip())
+        profile.pop(key, None)
+        if not value:
+            continue
+        if not os.path.isabs(value) or not os.path.isfile(value):
+            return f"Could not find the {label} at {value}."
+        profile[key] = value
+    for key, label, low, high in (("baseMtu", "Tunnel packet size", 576, 65535), ("reconnectTimeout", "Reconnect patience", 10, 86400)):
+        value = str(fields.get(key) or "").strip()
+        profile.pop(key, None)
+        if not value:
+            continue
+        if not value.isdigit() or not low <= int(value) <= high:
+            return f"{label} must be a number from {low} to {high}."
+        profile[key] = int(value)
+    return ""
+
+
+def cmd_profile_save(name: str, raw: str) -> int:
+    """One editor save, all or nothing. The answer is JSON so the bar reads the reason."""
+    def answer(error: str = "") -> int:
+        print(json.dumps({"ok": not error, "error": error}))
+        return 2 if error else 0
+
+    try:
+        fields = json.loads(raw)
+    except json.JSONDecodeError:
+        return answer("Could not read those settings.")
+    if not isinstance(fields, dict):
+        return answer("Could not read those settings.")
+    store = load_profiles()
+    existing = find_profile(store, name) if name else None
+    if name and existing is None:
+        return answer("That VPN is no longer saved.")
+    profile = dict(existing or {"name": "", "mode": "gateway"})
+    error = apply_fields(profile, fields)
+    if error:
+        return answer(error)
+    wanted = str(fields.get("name") or "").strip() or name or str(profile["portal"])
+    other = find_profile(store, wanted)
+    if other is not None and other is not existing:
+        return answer(f"You already have a VPN called {wanted}.")
+    if existing is None:
+        profile["name"] = wanted
+        store["profiles"].append(normalize(profile))
+        store["active"] = wanted
+    else:
+        existing.clear()
+        existing.update(normalize(profile))
+        if wanted != name:
+            rename_profile(store, existing, wanted)
+    save_profiles(store)
+    return answer()
+
+
+def cmd_profile_set(name: str, key: str, value: str) -> int:
+    store = load_profiles()
+    if key == "active":
+        if find_profile(store, name) is None:
+            print("No such profile", file=sys.stderr)
+            return 2
+        store["active"] = name
+        save_profiles(store)
+        print(json.dumps(store))
+        return 0
+    profile = find_profile(store, name)
+    if profile is None:
+        print("No such profile", file=sys.stderr)
+        return 2
+    if key == "gateways":
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            print("gateways value must be JSON", file=sys.stderr)
+            return 2
+        if not isinstance(parsed, list):
+            print("gateways value must be a list", file=sys.stderr)
+            return 2
+        # The cached portal list never replaces a manual gateway override.
+        profile["gateways"] = parsed
+    elif key == "name":
+        wanted = value.strip()
+        other = find_profile(store, wanted)
+        if not wanted or (other is not None and other is not profile):
+            print("That name is empty or already used.", file=sys.stderr)
+            return 2
+        rename_profile(store, profile, wanted)
+    elif key == "portal":
+        problem = portal_problem(value)
+        if problem:
+            print(problem, file=sys.stderr)
+            return 2
+        profile[key] = clean_portal(value)
+    elif key in {"gateway", "gatewayName", "username"}:
+        profile[key] = value
+    elif key == "mode":
+        profile["mode"] = "gateway"
+    elif key == "authMethod":
+        if value not in ("sso", "password"):
+            print(f"Invalid authMethod value: {value}", file=sys.stderr)
+            return 2
+        profile[key] = value
+    elif key == "interface":
+        if value not in ("gateway", "portal"):
+            print(f"Invalid interface value: {value}", file=sys.stderr)
+            return 2
+        profile[key] = value
+    elif key in _WHITELIST_KEYS and key not in {"noDtls", "baseMtu", "reconnectTimeout"}:
+        profile[key] = value
+    elif key == "noDtls":
+        lo = value.lower()
+        if lo in ("on", "true"):
+            profile[key] = True
+        elif lo in ("off", "false"):
+            profile[key] = False
+        else:
+            print(f"Invalid noDtls value: {value}", file=sys.stderr)
+            return 2
+    elif key == "baseMtu":
+        try:
+            profile[key] = int(value)
+        except ValueError:
+            print(f"Invalid baseMtu value: {value}", file=sys.stderr)
+            return 2
+    elif key == "reconnectTimeout":
+        try:
+            profile[key] = int(value)
+        except ValueError:
+            print(f"Invalid reconnectTimeout value: {value}", file=sys.stderr)
+            return 2
+    else:
+        print("Unknown profile field", file=sys.stderr)
+        return 2
+    profile.update(normalize(profile))
+    # normalize() would drop an explicit empty gateway; restore the set value.
+    if key == "gateway":
+        profile["gateway"] = value
+    if key == "gatewayName":
+        profile["gatewayName"] = value
+    save_profiles(store)
+    print(json.dumps(store))
+    return 0
+
+
+def cmd_forget(name: str) -> int:
+    path = cookie_jar(name)
+    if os.path.isfile(path):
+        os.unlink(path)
+    print(json.dumps({"forgot": name}))
+    return 0
+
+
+def cmd_notify() -> int:
+    raw = sys.stdin.readline()
+    try:
+        alert = json.loads(raw or "")
+    except json.JSONDecodeError:
+        print("gpvpn-notify: bad request", file=sys.stderr)
+        return 2
+    summary = redact(str(alert.get("summary") or "OmaGlobal"))
+    body = redact(str(alert.get("body") or ""))
+    try:
+        from gi.repository import Gio, GLib
+
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        bus.call_sync(
+            "org.freedesktop.Notifications",
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "Notify",
+            GLib.Variant(
+                "(susssasa{sv}i)",
+                ("OmaGlobal", 0, "network-vpn", summary, body, [], {}, -1),
+            ),
+            None,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            None,
+        )
+    except Exception as error:  # dbus missing in a headless test is not fatal to the bar
+        print(f"gpvpn-notify: {type(error).__name__}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="gpvpn")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    connect = sub.add_parser("connect")
+    connect.add_argument("--profile", default="")
+    connect.add_argument("--debug", action="store_true")
+
+    disconnect = sub.add_parser("disconnect")
+    disconnect.add_argument("--profile", default="")
+
+    sub.add_parser("status")
+    sub.add_parser("setup-check")
+    sub.add_parser("deps")
+    sub.add_parser("notify")
+
+    forget = sub.add_parser("forget")
+    forget.add_argument("name")
+
+    profile = sub.add_parser("profile")
+    profile_sub = profile.add_subparsers(dest="profile_cmd", required=True)
+    profile_sub.add_parser("list")
+    add = profile_sub.add_parser("add")
+    add.add_argument("--name", required=True)
+    add.add_argument("--portal", default="")
+    add.add_argument("--username", default="")
+    add.add_argument("--gateway", default="")
+    add.add_argument("--gateway-name", default="")
+    remove = profile_sub.add_parser("remove")
+    remove.add_argument("name")
+    setter = profile_sub.add_parser("set")
+    setter.add_argument("name")
+    setter.add_argument("key")
+    setter.add_argument("value")
+    saver = profile_sub.add_parser("save")
+    saver.add_argument("name", help='the VPN to change, or "" for a new one')
+    saver.add_argument("fields", help="the editor's fields as JSON")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.cmd == "connect":
+        return cmd_connect(args.profile, args.debug)
+    if args.cmd == "disconnect":
+        return cmd_disconnect()
+    if args.cmd == "status":
+        return cmd_status()
+    if args.cmd == "setup-check":
+        return cmd_setup_check()
+    if args.cmd == "deps":
+        return cmd_deps()
+    if args.cmd == "notify":
+        return cmd_notify()
+    if args.cmd == "forget":
+        return cmd_forget(args.name)
+    if args.cmd == "profile" and args.profile_cmd == "list":
+        return cmd_profile_list()
+    if args.cmd == "profile":
+        with store_lock():
+            if args.profile_cmd == "add":
+                return cmd_profile_add(args)
+            if args.profile_cmd == "remove":
+                return cmd_profile_remove(args.name)
+            if args.profile_cmd == "set":
+                return cmd_profile_set(args.name, args.key, args.value)
+            if args.profile_cmd == "save":
+                return cmd_profile_save(args.name, args.fields)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,4 @@
+singleton OmaStore 1.0 OmaStore.qml
+OmaPopup 1.0 OmaPopup.qml
+singleton ShieldMotion 1.0 ShieldMotion.qml
+ShieldMark 1.0 ShieldMark.qml
