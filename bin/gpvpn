@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 """gpvpn — user-session helper for OmaGlobal.
 
@@ -19,7 +19,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import signal
 import socket
 import subprocess
@@ -241,6 +240,8 @@ def saml_failure(text: str) -> str:
         return "Could not find that VPN address. Check the spelling and your internet connection."
     if "max retries exceeded" in lower or "timed out" in lower or "connection refused" in lower:
         return "Could not reach the VPN. Check your internet connection and try again."
+    if "modulenotfounderror" in lower or "either gi (pygobject)" in lower:
+        return "The sign-in helper is missing its Python libraries. Run Install again from the dropdown."
     return "Sign-in did not finish. Try again."
 
 
@@ -314,51 +315,6 @@ def transact(payload: dict[str, object], terminal: bool, timeout: float = 12) ->
         client.close()
 
 
-def saml_python() -> str:
-    """An interpreter that can import gi.
-
-    A version-manager shim (mise, pyenv, asdf) first on PATH shadows the
-    distro python that python-gobject was built for, and the shim also
-    hides the versioned interpreters behind it. Probe every python3 on
-    PATH -- the current interpreter first -- and use the first whose
-    `import gi` succeeds.
-    """
-    candidates: list[str] = []
-    seen: set[str] = set()
-
-    def add(candidate: str | None) -> None:
-        if candidate and candidate not in seen:
-            seen.add(candidate)
-            candidates.append(candidate)
-
-    add(sys.executable)
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        # A shim (mise, pyenv, asdf) only dispatches to a real interpreter and
-        # can serialize on the manager's own lock; the scan finds the
-        # interpreter it points at, so probing shims only adds stalls.
-        if any(part == "shims" for part in os.path.normpath(directory).split(os.sep)):
-            continue
-        try:
-            names = os.listdir(directory)
-        except OSError:
-            continue
-        for name in sorted(names):
-            if not re.fullmatch(r"python3(\.\d+)?", name):
-                continue
-            path = os.path.join(directory, name)
-            if os.path.isfile(path) and os.access(path, os.X_OK):
-                add(path)
-    for candidate in candidates:
-        try:
-            probe = subprocess.run(
-                [candidate, "-c", "import gi"], capture_output=True, timeout=10
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if probe.returncode == 0:
-            return candidate
-    return shutil.which("python3") or "python3"
-
 
 def saml_env_and_argv(portal: str, jar: str, interface: str = "portal", profile: dict[str, object] | None = None) -> tuple[dict[str, str], list[str]]:
     """Both WebKit variables, no -S/-P/-E/-x, cookie jar via -C.
@@ -371,7 +327,7 @@ def saml_env_and_argv(portal: str, jar: str, interface: str = "portal", profile:
     env["WEBKIT_DISABLE_DMABUF_RENDERER"] = "1"
     endpoint = "-p" if interface == "portal" else "-g"
     client_os = _CLIENT_OS.get(str(profile.get("os") or "")[:3], "Linux")
-    argv = [saml_python(), saml_script(), endpoint, "--clientos", client_os, "-C", jar]
+    argv = [sys.executable, saml_script(), endpoint, "--clientos", client_os, "-C", jar]
     if _is_set(profile.get("useragent")):
         argv += ["--user-agent", str(profile["useragent"])]
     if _is_set(profile.get("certificate")):
@@ -589,6 +545,30 @@ def cmd_setup_check() -> int:
     return 0
 
 
+def _signin_runtime_present() -> bool:
+    """Can this helper's interpreter actually open the sign-in?
+
+    Asks the distro python directly instead of trusting package names: the
+    check imports what gp-saml-gui needs. cwd="/" keeps a stray gi.py in
+    whatever directory the user ran from out of the import path.
+    """
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import gi, requests"
+            "; gi.require_version('Gtk', '3.0')"
+            "; gi.require_version('WebKit2', '4.1')"
+            "; from gi.repository import Gtk, WebKit2",
+        ],
+        cwd="/",
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return completed.returncode == 0
+
+
 def _package_present(name: str) -> bool:
     completed = subprocess.run(
         ["pacman", "-Q", name],
@@ -663,6 +643,14 @@ def dep_items() -> list[dict[str, object]]:
                 "required": required,
             }
         )
+    items.append(
+        {
+            "name": "python-signin-runtime",
+            "purpose": "Login window libraries importable",
+            "present": _signin_runtime_present(),
+            "required": True,
+        }
+    )
     items.append(
         {
             "name": "gp-saml-gui",
