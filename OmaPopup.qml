@@ -739,6 +739,32 @@ Column {
       text: OmaStore.message
     }
 
+    // What actually failed: the tunnel's own last lines, one small click away.
+    Button {
+      objectName: "failDetailToggle"
+      visible: OmaStore.phase === "failed" && !OmaStore.askPassword && !root.connecting && OmaStore.detail !== ""
+      width: parent.width
+      leftAlign: true
+      bordered: true
+      fontSize: Style.font.bodySmall
+      text: failDetailCard.visible ? "Hide details" : "(see More)"
+      onClicked: failDetailCard.visible = !failDetailCard.visible
+    }
+
+    Column {
+      id: failDetailCard
+      objectName: "failDetailCard"
+      visible: false
+      width: parent.width
+      spacing: Style.space(2)
+
+      HintCaption {
+        objectName: "failDetailText"
+        width: parent.width
+        text: OmaStore.detail
+      }
+    }
+
     Button {
       objectName: "vpnConnectButton"
       width: parent.width
