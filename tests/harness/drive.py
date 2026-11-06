@@ -225,6 +225,8 @@ def scenario_states(shell: Path) -> None:
             raise SystemExit(f"disconnect did not idle {rows[6]['phase']} {rows[6]['notifyDisconnectCount']}")
         if rows[8]["phase"] != "failed" or rows[8]["iconRole"] != "urgent" or rows[8]["notifyDropCount"] != 1:
             raise SystemExit(f"drop state mismatch {rows[8]}")
+        if rows[8]["detail"] == "":
+            raise SystemExit(f"failure detail did not reach the store {rows[8]['detail']!r}")
         if rows[9]["notifyDropCount"] != 1 or rows[4]["notifyConnectCount"] != 1 or rows[7]["notifyConnectCount"] != 2:
             raise SystemExit("notification counts moved more than once per event")
         if rows[10]["opened"] is not True or rows[11]["opened"] is not False:
@@ -652,6 +654,33 @@ def scenario_cancel(shell: Path) -> None:
     print("CANCEL sign-in window closes; password asks every attempt")
 
 
+def scenario_fail_details(shell: Path) -> None:
+    """A failed connect keeps the tunnel's own lines behind a small (see More)."""
+    root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
+    sock = os.path.join(root, "ctrl.sock")
+    env = ready_env(root, sock)
+    seed(env, ADD)
+    fake = start_fake(sock)
+    try:
+        steps = ",".join([
+            "push:failed", "open", "screen:main",
+            "expect:failDetailToggle:visible=true",
+            "mouse:failDetailToggle", "expect:failDetailToggle:text=Hide details",
+            "expect:failDetailCard:visible=true",
+            "mouse:failDetailToggle", "expect:failDetailToggle:text=(see More)",
+            "expect:failDetailCard:visible=false",
+        ])
+        proc = run_main(shell, BASE_SETTINGS, steps, sock, None, True, env)
+        steps_ok(proc, "fail details")
+        row = snaps(proc)[-1]
+        require_no_overlaps([row], "scenario")
+        if "Network is unreachable" not in row["failDetailText"]:
+            raise SystemExit(f"details toggle did not reveal the raw lines {row['failDetailText']!r}")
+    finally:
+        stop_fake(fake)
+    print("FAILDETAILS (see More) reveals the tunnel's own lines")
+
+
 def scenario_update(shell: Path) -> None:
     """A plugin update with an older daemon offers Update, not a broken connect."""
     root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
@@ -720,6 +749,7 @@ def main() -> int:
     scenario_real_connect(shell)
     scenario_shield(shell)
     scenario_cancel(shell)
+    scenario_fail_details(shell)
     scenario_update(shell)
     scenario_negative(shell)
     print("CLEAN")
