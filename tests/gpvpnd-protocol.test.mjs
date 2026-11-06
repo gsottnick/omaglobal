@@ -357,6 +357,81 @@ test("vpncScript owned by test user is refused (not root-owned)", async () => {
   }
 })
 
+// A root-owned file whose whole path is root-only. /bin/sh is usually a symlink
+// on Arch, so the alias case below also covers a target that is one itself.
+const rootScript = fs.realpathSync("/bin/sh")
+
+for (const [key, flag] of [["vpncScript", "--script"], ["csdWrapper", "--csd-wrapper"]]) {
+  test(`${key} reaches openconnect as its canonical path, not the client's alias`, async () => {
+    const { dir, env } = await tempHome()
+    const alias = path.join(dir, "alias")
+    await fs.promises.symlink(rootScript, alias)
+    const daemon = startDaemon(dir, env, "ok")
+    try {
+      await waitForDaemon(daemon.sock)
+      await collect(daemon.sock, { ...connect(), options: { [key]: alias } }, {
+        until: (rows) => rows.some((row) => row.state === "connected" || row.type === "error"),
+        timeout: 4000,
+      })
+      const argv = (await readText(path.join(dir, "oc", "argv"))).split("\n")
+      assert.equal(argv[argv.indexOf(flag) + 1], rootScript)
+      assert.equal(argv.includes(alias), false)
+    } finally {
+      await stopDaemon(daemon.child)
+    }
+  })
+
+  test(`${key} cannot hide text behind .. past a missing name`, async () => {
+    const { dir, env } = await tempHome()
+    const smuggled = `/omaglobal-missing;touch\${IFS}pwned;/..${rootScript}`
+    const daemon = startDaemon(dir, env, "ok")
+    try {
+      await waitForDaemon(daemon.sock)
+      const session = await collect(daemon.sock, { ...connect(), options: { [key]: smuggled } }, {
+        until: (rows) => rows.some((row) => row.type === "error"),
+        timeout: 2000,
+      })
+      assert.equal(session.find((row) => row.type === "error").message, "That file does not exist.")
+      assert.equal(fs.existsSync(path.join(dir, "oc", "argv")), false)
+    } finally {
+      await stopDaemon(daemon.child)
+    }
+  })
+}
+
+test("a directory is not an admin script", async () => {
+  const { dir, env } = await tempHome()
+  const daemon = startDaemon(dir, env, "ok")
+  try {
+    await waitForDaemon(daemon.sock)
+    const session = await collect(daemon.sock, { ...connect(), options: { vpncScript: "/usr/bin" } }, {
+      until: (rows) => rows.some((row) => row.type === "error"),
+      timeout: 2000,
+    })
+    assert.ok(session.find((row) => row.type === "error").message.includes("admin"))
+  } finally {
+    await stopDaemon(daemon.child)
+  }
+})
+
+test("--script is shell-quoted because openconnect runs it through sh -c", () => {
+  const result = spawnSync("python3", ["-I", "-c", `
+import importlib.machinery, importlib.util, sys
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("gpvpnd", ${JSON.stringify(gpvpnd)})
+spec = importlib.util.spec_from_loader("gpvpnd", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+mod._resolve_admin_path = lambda path: ("/opt/my vpn/$(id)", None)
+argv, err = mod.build_argv("openconnect", "u", "gateway:g", "vpn.example.com",
+                           options={"vpncScript": "/x"}, peer_uid=1000)
+print(err)
+print(argv[argv.index("--script") + 1])
+`], { encoding: "utf8", timeout: 5000 })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, "None\n'/opt/my vpn/$(id)'\n")
+})
+
 test("symlink to root-only file for cafile is refused", async () => {
   const { dir, env } = await tempHome()
   const { symlink } = await import("node:fs/promises")
