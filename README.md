@@ -58,4 +58,4 @@ Uninstall: remove the widget from the bar, then `systemctl disable --now gp-vpn.
 
 ## License
 
-`bin/gpvpn`, `bin/gpvpnd`, and `tools/setup.sh` are GPL-3.0-or-later. The QML is MIT. `manifest.json` declares both.
+`bin/gpvpn`, `bin/gpvpnd`, and `tools/setup.sh` are GPL-3.0-or-later: see [LICENSE](LICENSE). The QML is MIT: see [LICENSE-MIT](LICENSE-MIT). `manifest.json` declares both.
