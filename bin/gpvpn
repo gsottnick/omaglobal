@@ -314,8 +314,6 @@ def transact(payload: dict[str, object], terminal: bool, timeout: float = 12) ->
     finally:
         client.close()
 
-
-
 def saml_env_and_argv(portal: str, jar: str, interface: str = "portal", profile: dict[str, object] | None = None) -> tuple[dict[str, str], list[str]]:
     """Both WebKit variables, no -S/-P/-E/-x, cookie jar via -C.
 
