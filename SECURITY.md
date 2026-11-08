@@ -8,6 +8,8 @@ This applies only when a security check script (`--csd-wrapper`) is configured a
 
 Without process isolation, any other local account could copy that cookie from `/proc/<pid>/cmdline` while the script runs. So the daemon refuses a connect that sets a HIP script unless the `/proc` mount it sees (`/proc/self/mountinfo`) has `hidepid=1`, `2`, `noaccess` or `invisible`. Connections without a HIP script are not affected.
 
+That check lives in the root daemon, which only changes when setup runs, so a plugin update can arrive before it. Until the installed `/usr/local/bin/gpvpnd` matches the plugin's copy, auto-connect does not run and `gpvpn connect` refuses a profile with a HIP script before the sign-in window opens, so an older daemon never receives a cookie for one.
+
 To use a HIP script, an admin mounts `/proc` with `hidepid=invisible`, for example with `proc /proc proc defaults,hidepid=invisible 0 0` in `/etc/fstab` and `sudo mount -o remount,hidepid=invisible /proc`. OmaGlobal does not do this for you because it changes the whole system and can break services that read other users' processes.
 
 ## What the socket can do
@@ -30,7 +32,7 @@ The helper spawns the login tool from an argument list. It does not build a shel
 
 ## What setup does
 
-`tools/setup.sh` is the only privileged step. It also installs daemon updates: the bar compares `/usr/local/bin/gpvpnd` with the copy in the plugin and offers Update when they differ, so a plugin update never runs against an older root daemon by accident. The dropdown's Install button opens your terminal and runs that script; you approve the password there. The widget and the helper do not call sudo or pkexec. The script installs packages, a pinned gp-saml-gui checkout, and the systemd unit, writing progress to `~/.local/state/gp-vpn/install.json` (plain status text, no secrets). Review it before you run it.
+`tools/setup.sh` is the only privileged step. It also installs daemon updates: the bar compares `/usr/local/bin/gpvpnd` with the copy in the plugin and offers Update when they differ; until then auto-connect waits and a HIP-script connect is refused (see above). The dropdown's Install button opens your terminal and runs that script; you approve the password there. The widget and the helper do not call sudo or pkexec. The script installs packages, a pinned gp-saml-gui checkout, and the systemd unit, writing progress to `~/.local/state/gp-vpn/install.json` (plain status text, no secrets). Review it before you run it.
 
 ## What this does not protect
 

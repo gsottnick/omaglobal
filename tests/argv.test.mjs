@@ -5,7 +5,7 @@ import { statSync } from "node:fs"
 import { createHash } from "node:crypto"
 import { writeFile } from "node:fs/promises"
 import {
-  COOKIE, SAML_OK, gpvpn, tempHome, writeSaml, run, startDaemon, stopDaemon, waitForDaemon, readText,
+  COOKIE, SAML_OK, gpvpn, repo, tempHome, writeSaml, run, startDaemon, stopDaemon, waitForDaemon, readText,
 } from "./support.mjs"
 
 function cookieJar(env, name) {
@@ -144,6 +144,30 @@ test("a gateway failure retries onto the portal interface and then connects", as
     const groups = (await readText(path.join(dir, "oc", "usergroup.log"))).trim().split("\n").filter(Boolean)
     assert.deepEqual(groups, ["gateway:prelogin-cookie", "portal:prelogin-cookie"])
     assert.equal(JSON.parse(result.stdout).state, "connected")
+  } finally {
+    await stopDaemon(daemon.child)
+  }
+})
+
+test("a HIP script is never sent to a daemon older than this plugin", async () => {
+  const { dir, env } = await tempHome()
+  await writeSaml(env, SAML_OK)
+  const daemon = startDaemon(dir, env, "ok")
+  env.GPVPN_SOCKET = daemon.sock
+  env.GPVPN_DAEMON = path.join(dir, "installed-gpvpnd")
+  try {
+    await waitForDaemon(daemon.sock)
+    await run(gpvpn, ["profile", "add", "--name", "Default", "--portal", "vpn.example.com", "--username", "user@example.com"], env)
+    await run(gpvpn, ["profile", "set", "Default", "csdWrapper", "/usr/bin/true"], env)
+    await writeFile(env.GPVPN_DAEMON, "0.2.10 build\n")
+    const stale = await run(gpvpn, ["connect", "--profile", "Default"], env)
+    assert.equal(stale.code, 5)
+    assert.match(stale.stderr, /older than this plugin/)
+    // Refused before the login window, so no cookie exists to leak.
+    assert.equal(await readText(path.join(env.XDG_DATA_HOME, "saml-record.json")), "")
+    await writeFile(env.GPVPN_DAEMON, await readText(path.join(repo, "bin", "gpvpnd")))
+    const current = await run(gpvpn, ["connect", "--profile", "Default"], env)
+    assert.doesNotMatch(current.stderr, /older than this plugin/)
   } finally {
     await stopDaemon(daemon.child)
   }

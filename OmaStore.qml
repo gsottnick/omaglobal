@@ -208,7 +208,8 @@ Singleton {
   }
 
   function maybeAutoConnect() {
-    if (!profilesLoaded || !autoConnect || autoTried || !socketUp)
+    // An older root daemon (ready false) may lack the HIP cookie guard; wait for setup.
+    if (!profilesLoaded || !autoConnect || autoTried || !socketUp || !depsLoaded || !ready)
       return
     if (!profiles.length || profileSaving || connectAfterSave || connectProc.running)
       return
@@ -618,6 +619,7 @@ Singleton {
     depsLoaded = true
     if (ready && !socketUp)
       pokeSocket()
+    maybeAutoConnect()
   }
 
   function applyInstall(text) {

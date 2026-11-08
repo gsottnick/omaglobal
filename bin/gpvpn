@@ -26,6 +26,7 @@ import sys
 
 SAML_PIN = "21cce40334791a533c7a263fe367f0ddc072d8fb"
 SETUP_HINT = "Daemon socket is not available. Press Install in the bar, or run tools/setup.sh once in a terminal."
+DAEMON_UPDATE_HINT = "The VPN service is older than this plugin and may expose your VPN cookie to the security check script. Press Update in the bar, or run tools/setup.sh once in a terminal."
 WEBKIT_HINT = "The login window needs webkit2gtk-4.1. Press Install in the bar, or run tools/setup.sh once in a terminal."
 CONNECT_WAIT = 90
 _COOKIE_SHAPED = re.compile(r"[A-Za-z0-9+/=]{40,}")
@@ -474,6 +475,12 @@ def cmd_connect(profile_name: str, debug: bool) -> int:
     if profile is None:
         print("That VPN is no longer saved. Add it again from the bar.", file=sys.stderr)
         return 2
+
+    # Only a daemon matching this plugin refuses a HIP script without hidepid;
+    # an older one would hand openconnect the cookie in a readable argv.
+    if "csdWrapper" in _build_options(profile) and not daemon_current():
+        print(DAEMON_UPDATE_HINT, file=sys.stderr)
+        return 5
 
     # Password mode: skip SAML entirely, read password from stdin
     auth_method = str(profile.get("authMethod") or "sso")
