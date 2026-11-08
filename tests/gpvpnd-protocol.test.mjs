@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process"
 import { statSync } from "node:fs"
 import {
   COOKIE, gpvpnd, fakeOpenconnect, tempHome, startDaemon, stopDaemon, waitForDaemon, collect, readText,
-  repo,
+  repo, procMount,
 } from "./support.mjs"
 
 const connect = (gateway = "") => ({
@@ -398,6 +398,53 @@ for (const [key, flag] of [["vpncScript", "--script"], ["csdWrapper", "--csd-wra
     }
   })
 }
+
+test("a HIP script is refused while other accounts can read its command line", async () => {
+  const { dir, env } = await tempHome()
+  const daemon = startDaemon(dir, env, "ok", {}, procMount("rw"))
+  try {
+    await waitForDaemon(daemon.sock)
+    const session = await collect(daemon.sock, { ...connect(), options: { csdWrapper: rootScript } }, {
+      until: (rows) => rows.some((row) => row.type === "error"),
+      timeout: 2000,
+    })
+    assert.match(session.find((row) => row.type === "error").message, /hidepid=invisible/)
+    assert.equal(fs.existsSync(path.join(dir, "oc", "argv")), false)
+  } finally {
+    await stopDaemon(daemon.child)
+  }
+})
+
+test("only a hidepid on the top /proc mount hides command lines", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gpvpnd-mi-"))
+  const binfmt = "26 50 0:33 / /proc/sys/fs/binfmt_misc rw,relatime shared:13 - autofs systemd-1 rw,fd=37,pgrp=1\n"
+  const cases = [
+    [procMount("rw") + binfmt, false],
+    [procMount("rw,hidepid=invisible"), true],
+    [procMount("rw,hidepid=2"), true],
+    [procMount("rw,hidepid=noaccess"), true],
+    [procMount("rw,hidepid=0"), false],
+    [procMount("rw,hidepid=invisible") + procMount("rw"), false],
+    ["", false],
+  ]
+  const files = cases.map(([text], i) => {
+    const file = path.join(dir, `mi${i}`)
+    fs.writeFileSync(file, text)
+    return file
+  })
+  files.push(path.join(dir, "missing"))
+  const result = spawnSync("python3", ["-I", "-c", `
+import importlib.machinery, importlib.util, json, sys
+sys.dont_write_bytecode = True
+loader = importlib.machinery.SourceFileLoader("gpvpnd", sys.argv[1])
+spec = importlib.util.spec_from_loader("gpvpnd", loader)
+mod = importlib.util.module_from_spec(spec)
+loader.exec_module(mod)
+print(json.dumps([mod.proc_hides_cmdlines(f) for f in sys.argv[2:]]))
+`, gpvpnd, ...files], { encoding: "utf8" })
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(JSON.parse(result.stdout), [...cases.map(([, hidden]) => hidden), false])
+})
 
 test("a directory is not an admin script", async () => {
   const { dir, env } = await tempHome()
