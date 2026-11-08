@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises"
-import { existsSync } from "node:fs"
+import { existsSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import net from "node:net"
@@ -131,13 +131,20 @@ export async function waitForDaemon(sock) {
   throw new Error("daemon did not listen")
 }
 
-export function startDaemon(dir, env, mode = "ok", extraEnv = {}) {
+// The /proc line of /proc/self/mountinfo on Arch, with and without hidepid.
+export const procMount = (opts = "rw") =>
+  `50 42 0:24 / /proc rw,nosuid,nodev,noexec,relatime shared:11 - proc proc ${opts}\n`
+
+export function startDaemon(dir, env, mode = "ok", extraEnv = {}, mountinfo = procMount("rw,hidepid=invisible")) {
   const sock = path.join(dir, "ctrl.sock")
   const ocDir = path.join(dir, "oc")
+  const mountinfoPath = path.join(dir, "mountinfo")
+  writeFileSync(mountinfoPath, mountinfo)
   const child = spawn(gpvpnd, [
     "--socket", sock,
     "--openconnect", fakeOpenconnect,
     "--state-file", path.join(dir, "state.json"),
+    "--mountinfo", mountinfoPath,
   ], {
     env: {
       ...env,

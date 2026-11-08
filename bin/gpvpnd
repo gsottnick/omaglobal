@@ -8,6 +8,8 @@ all, is the systemd unit the user installed with tools/setup.sh. Tests pass
 
 The openconnect argument list is fixed. The prelogin cookie is written to
 the child's stdin and is never placed on the command line or in a log line.
+openconnect itself passes the session cookie in a HIP script's argv, so a
+HIP script is refused unless /proc is mounted with hidepid. See SECURITY.md.
 """
 
 from __future__ import annotations
@@ -462,9 +464,36 @@ def _open_user_files(
     return None
 
 
+def proc_hides_cmdlines(mountinfo: str) -> bool:
+    """True when /proc keeps other users' command lines unreadable.
+
+    openconnect hands a HIP script the session cookie in its argv, so a HIP
+    script is only safe when hidepid stops other accounts reading it.
+    """
+    hidden = False
+    try:
+        with open(mountinfo, encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.split()
+                if len(fields) < 10 or fields[4] != "/proc" or "-" not in fields:
+                    continue
+                tail = fields[fields.index("-") + 1:]
+                if len(tail) < 3 or tail[0] != "proc":
+                    continue
+                # The last /proc mount is the one on top.
+                hidden = any(
+                    opt in ("hidepid=1", "hidepid=2", "hidepid=noaccess", "hidepid=invisible")
+                    for opt in tail[2].split(",")
+                )
+    except OSError:
+        return False
+    return hidden
+
+
 class Daemon:
-    def __init__(self, openconnect: str, state_file: str, verbose: bool) -> None:
+    def __init__(self, openconnect: str, state_file: str, verbose: bool, mountinfo: str = "/proc/self/mountinfo") -> None:
         self.openconnect = openconnect
+        self.mountinfo = mountinfo
         self.state_file = state_file
         self.verbose = verbose
         self.lock = threading.Lock()
@@ -716,6 +745,8 @@ class Daemon:
         # resolve the peer's username.
         if csd_user is None and isinstance(options, dict) and "csdWrapper" in options:
             return {"type": "error", "message": "Cannot find your user name, so the security check script cannot run safely."}
+        if isinstance(options, dict) and "csdWrapper" in options and not proc_hides_cmdlines(self.mountinfo):
+            return {"type": "error", "message": "The security check script would expose your VPN cookie to other accounts. An admin must mount /proc with hidepid=invisible first; see SECURITY.md."}
 
         # Validate options against whitelist (pure check, no side effects)
         err = _validate_options(options, password_mode, usergroup, uid)
@@ -1045,9 +1076,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--socket", default=os.environ.get("GPVPN_SOCKET") or "/run/gp-vpn/ctrl.sock")
     parser.add_argument("--openconnect", default="openconnect")
     parser.add_argument("--state-file", default="")
+    parser.add_argument("--mountinfo", default="/proc/self/mountinfo")
     parser.add_argument("-v", action="store_true")
     args = parser.parse_args(argv)
-    Daemon(args.openconnect, args.state_file, args.v).serve(args.socket)
+    Daemon(args.openconnect, args.state_file, args.v, args.mountinfo).serve(args.socket)
     return 0
 
 

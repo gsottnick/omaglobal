@@ -96,3 +96,12 @@ test("shield colors come from what a theme color is, not its slot", async () => 
   const mono = `color1 = "#888888"\ncolor2 = "#aaaaaa"\naccent = "#cccccc"\n`
   assert.deepEqual(signals(mono), ["ok", "busy", "fail"])
 })
+
+test("the HIP script's hidepid requirement is stated where the user sets it", async () => {
+  const popup = await read("OmaPopup.qml")
+  assert.match(popup, /needs \/proc mounted with hidepid, so other accounts cannot see your VPN cookie/)
+  const security = await read("SECURITY.md")
+  assert.match(security, /--cookie <session cookie>/)
+  assert.match(security, /hidepid=invisible/)
+  assert.doesNotMatch(security, /`\/proc\/<pid>\/cmdline` never sees it/)
+})

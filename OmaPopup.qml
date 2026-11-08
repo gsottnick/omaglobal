@@ -1062,7 +1062,7 @@ Column {
             onTextChanged: root.edit.csdWrapper = text
           }
           HintCaption {
-            text: "Some gateways demand a Host Information Policy report. The script must be installed by an admin; it runs as your user. Off unless required."
+            text: "Some gateways demand a Host Information Policy report. The script must be installed by an admin; it runs as your user. It also needs /proc mounted with hidepid, so other accounts cannot see your VPN cookie. Off unless required."
           }
 
           // --- servercert pin ---

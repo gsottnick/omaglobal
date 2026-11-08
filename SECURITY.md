@@ -2,17 +2,25 @@
 
 OmaGlobal's control socket is a local trust boundary.
 
+## HIP scripts see the session cookie on their command line
+
+This applies only when a security check script (`--csd-wrapper`) is configured and the gateway asks for a HIP report. openconnect then runs the script with `--cookie <session cookie>` in its arguments (`run_hip_script` in openconnect 9.21 `gpst.c`). OmaGlobal cannot change that: it is how openconnect calls the script, and the script's interface expects it.
+
+Without process isolation, any other local account could copy that cookie from `/proc/<pid>/cmdline` while the script runs. So the daemon refuses a connect that sets a HIP script unless the `/proc` mount it sees (`/proc/self/mountinfo`) has `hidepid=1`, `2`, `noaccess` or `invisible`. Connections without a HIP script are not affected.
+
+To use a HIP script, an admin mounts `/proc` with `hidepid=invisible`, for example with `proc /proc proc defaults,hidepid=invisible 0 0` in `/etc/fstab` and `sudo mount -o remount,hidepid=invisible /proc`. OmaGlobal does not do this for you because it changes the whole system and can break services that read other users' processes.
+
 ## What the socket can do
 
 `/run/gp-vpn/ctrl.sock` is mode `0660` and group `wheel`, created by `gp-vpn.socket`. Anyone who can connect can ask the daemon to start or stop the one tunnel. They cannot ask it to run an arbitrary program.
 
 The daemon execs `openconnect` from an argument list. Base flags are fixed: protocol, user agent, user, OS, usergroup, `--passwd-on-stdin`, `--non-inter`, and the server. Anything the dropdown's Advanced screen adds comes through a whitelist validated at the daemon, one flag at a time. The daemon reads the connecting process's Unix socket credentials (`SO_PEERCRED`) to determine its uid and gid, then applies per-file ownership rules:
 
-- **Admin-installed scripts** (`--csd-wrapper`, `--script`): the daemon resolves the path once, and that canonical path must be a regular file owned by root (uid 0) with no group/other write bit, and every parent directory up to `/` must also be root-owned with no group/other write bit. openconnect receives the canonical path, never the client's spelling, so a symlink retargeted after validation changes nothing and `..` cannot smuggle text past the check. `--script` is run through `sh -c`, so that path is shell-quoted. Additionally, `--csd-user=<username>` is appended so openconnect drops privileges to the connecting user for the HIP script.
+- **Admin-installed scripts** (`--csd-wrapper`, `--script`): the daemon resolves the path once, and that canonical path must be a regular file owned by root (uid 0) with no group/other write bit, and every parent directory up to `/` must also be root-owned with no group/other write bit. openconnect receives the canonical path, never the client's spelling, so a symlink retargeted after validation changes nothing and `..` cannot smuggle text past the check. `--script` is run through `sh -c`, so that path is shell-quoted. Additionally, `--csd-user=<username>` is appended so openconnect drops privileges to the connecting user for the HIP script, and `--csd-wrapper` is refused unless `/proc` is mounted with hidepid (see above).
 - **User files** (`--cafile`, `--certificate`, `--sslkey`): the daemon opens the resolved path itself with `O_NOFOLLOW`, checks ownership and permissions with `fstat` on that descriptor, and passes `/dev/fd/<n>` to openconnect through `pass_fds`. A symlink retargeted after validation still points at the already-opened original file, so the check cannot be raced. csd-wrapper is refused entirely when the connecting user's identity or passwd name cannot be resolved (it would otherwise run as root without `--csd-user`).
 - When peer credentials are unavailable (e.g. systemd socket activation), file and script options are refused.
 
-The gateway pick travels as `--authgroup`, a plain value the daemon validates like the others. Unknown keys are refused, bad values are refused, and nothing is ever a shell string. The cookie or password is written to openconnect's stdin; `/proc/<pid>/cmdline` never sees it.
+The gateway pick travels as `--authgroup`, a plain value the daemon validates like the others. Unknown keys are refused, bad values are refused, and nothing is ever a shell string. The cookie or password is written to openconnect's stdin, so the daemon and openconnect never show it in `/proc/<pid>/cmdline`. The one exception is below.
 
 Password sign-in puts the password in the same channel as the cookie: the widget writes it to the helper's stdin, the helper to the socket, the daemon to openconnect's stdin. It is not stored anywhere.
 
