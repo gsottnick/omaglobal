@@ -298,10 +298,15 @@ def scenario_connect(shell: Path, plugin: Path | None = None) -> None:
         stop_fake(fake)
 
 
-def scenario_auto(shell: Path, enabled: bool) -> None:
+def scenario_auto(shell: Path, enabled: bool, stale: bool = False) -> None:
+    """stale: the root daemon predates the plugin, so auto-connect waits for Update."""
     root = tempfile.mkdtemp(prefix="omaglobal-xdg-")
     sock = os.path.join(root, "ctrl.sock")
-    env = xdg_env(sock, root)
+    env = ready_env(root, sock)
+    if stale:
+        old = Path(root) / "gpvpnd-0.2.10"
+        old.write_text("older build\n")
+        env["GPVPN_DAEMON"] = str(old)
     if enabled:
         seeded = subprocess.run(
             [str(REPO / "bin" / "gpvpn"), "profile", "add", "--name", "Default", "--portal", "vpn.example.com", "--username", "user@example.com"],
@@ -323,10 +328,10 @@ def scenario_auto(shell: Path, enabled: bool) -> None:
         row = snaps(proc)[-1]
         require_no_overlaps([row], "scenario")
         count = connect_spawns(row)
-        expect = 1 if enabled else 0
-        if count != expect or (enabled and row["autoTried"] is not True):
+        expect = 1 if enabled and not stale else 0
+        if count != expect or (expect and row["autoTried"] is not True):
             raise SystemExit(f"autoconnect spawns={count} autoTried={row['autoTried']}")
-        label = "AUTOCONNECT" if enabled else "AUTOCONNECT_OFF"
+        label = "AUTOCONNECT_STALE" if stale else "AUTOCONNECT" if enabled else "AUTOCONNECT_OFF"
         print(f"{label} spawns={count}")
     finally:
         stop_fake(fake)
@@ -743,6 +748,7 @@ def main() -> int:
     scenario_connect(shell, plugin)
     scenario_auto(shell, True)
     scenario_auto(shell, False)
+    scenario_auto(shell, True, stale=True)
     scenario_profile(shell)
     scenario_editor_controls(shell)
     scenario_manage(shell)
